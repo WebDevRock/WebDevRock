@@ -23,77 +23,70 @@ const { title, href, tags, description, label } = Astro.props;
 
 <style>
   .card {
-    display: block;
-    padding: 2rem;
-    background: var(--bg-surface);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    height: 100%;
+    padding: 20px;
     border: 1px solid var(--border-subtle);
-    border-radius: 16px;
+    border-radius: var(--radius-lg);
+    background: var(--surface-card);
+    box-shadow: var(--shadow-card);
+    color: var(--text-body);
     text-decoration: none;
-    color: inherit;
-    transition: all 0.3s ease;
-    position: relative;
-    overflow: hidden;
-  }
-
-  .card::before {
-    content: '';
-    position: absolute;
-    top: 0;
-    left: 0;
-    right: 0;
-    height: 3px;
-    background: var(--gradient-1);
-    opacity: 0;
-    transition: opacity 0.3s ease;
+    transition: background var(--dur-base) var(--ease-out), border-color var(--dur-base) var(--ease-out), box-shadow var(--dur-base) var(--ease-out);
   }
 
   .card:hover {
-    border-color: var(--border);
-    transform: translateY(-4px);
-    box-shadow: 0 20px 40px rgba(0, 0, 0, 0.3);
-  }
-
-  .card:hover::before {
-    opacity: 1;
+    background: var(--surface-raised);
+    border-color: var(--border-default);
+    box-shadow: var(--shadow-hover);
+    color: var(--text-body);
   }
 
   .label {
-    display: inline-block;
-    margin-bottom: 0.75rem;
-    padding: 0.15rem 0.5rem;
-    border: 1px solid color-mix(in srgb, var(--accent-amber) 45%, transparent);
-    border-radius: 4px;
-    color: var(--accent-amber);
+    align-self: flex-start;
+    padding: 2px 7px;
+    border-radius: var(--radius-xs);
+    background: var(--type-snippets-bg);
+    color: var(--type-snippets-fg);
     font-family: var(--font-mono);
-    font-size: 0.7rem;
+    font-size: 11.5px;
+    font-weight: 500;
   }
 
   .card h3 {
-    margin: 0 0 0.75rem 0;
-    font-size: 1.25rem;
-    font-weight: 600;
-    color: var(--text-primary);
-    letter-spacing: -0.01em;
+    color: var(--text-strong);
+    font-size: 17px;
+    font-weight: 650;
+    line-height: 1.3;
+  }
+
+  .card:hover h3 {
+    color: var(--text-link-hover);
   }
 
   .description {
-    margin: 0 0 1.5rem 0;
-    color: var(--text-secondary);
-    font-size: 0.95rem;
-    line-height: 1.6;
+    flex: 1;
+    color: var(--text-muted);
+    font-size: var(--fs-small);
+    line-height: var(--lh-small);
   }
 
   .tags {
     display: flex;
-    gap: 0.5rem;
     flex-wrap: wrap;
+    gap: 4px 10px;
   }
 
   .tag {
-    padding: 0.25rem 0.6rem;
-    background: var(--bg-elevated);
-    border-radius: 4px;
-    font-size: 0.75rem;
     color: var(--text-muted);
     font-family: var(--font-mono);
+    font-size: 12px;
   }
+
+  .tag::before {
+    content: '#';
+    opacity: .6;
+  }
+</style>

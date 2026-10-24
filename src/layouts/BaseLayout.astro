@@ -1,6 +1,9 @@
 ---
+// Site frame (design concept D, "Workbench"): a section sidebar beside the page, a top bar with breadcrumbs.
+// On phones the sidebar folds behind a menu button.
 import '../styles/global.css';
 import Search from '../components/Search.astro';
+import { SECTIONS, getContentPages, normalisePath } from '../lib/content';
 
 interface Props {
   title: string;
@@ -8,6 +11,7 @@ interface Props {
   type?: 'website' | 'article';
   updated?: string;
   noindex?: boolean; // e.g. the 404 page: keep it out of search engines and give it no canonical URL
+  crumbs?: { label: string; href?: string }[]; // after "Home"; worked out from the address when left out
 }
 
 const {
@@ -22,7 +26,7 @@ const siteName = 'WebDevRock';
 const fullTitle = `${title} — ${siteName}`;
 
 // Same trailing-slash form as the sitemap and nginx's directory URLs
-const path = Astro.url.pathname.endsWith('/') ? Astro.url.pathname : `${Astro.url.pathname}/`;
+const path = normalisePath(Astro.url.pathname);
 const canonical = new URL(path, Astro.site).href;
 const shareImage = new URL('/og-default.png', Astro.site).href;
 
@@ -31,16 +35,37 @@ const shareImage = new URL('/og-default.png', Astro.site).href;
 const umamiSrc = import.meta.env.PUBLIC_UMAMI_SRC;
 const umamiWebsiteId = import.meta.env.PUBLIC_UMAMI_WEBSITE_ID;
 const enableAnalytics = import.meta.env.PROD && umamiSrc && umamiWebsiteId;
+
+// Sidebar: every section with its page count; the current section also lists its pages
+const pages = getContentPages();
+const segments = path.split('/').filter(Boolean);
+const currentSection = SECTIONS.find((s) => s.key === segments[0]);
+const shortTitle = (t: string) => {
+  const short = t.replace(/^Designing (an? )?/i, '').replace(/^SQL Server: /, '');
+  return short.charAt(0).toUpperCase() + short.slice(1);
+};
+
+// Breadcrumbs: Home / Section / Page
+const otherAreas: Record<string, string> = { tags: 'Tags', search: 'Search' };
+const crumbs =
+  Astro.props.crumbs ??
+  (segments.length === 0 || noindex
+    ? []
+    : [
+        { label: currentSection?.name ?? otherAreas[segments[0]] ?? title, href: segments.length > 1 ? `/${segments[0]}/` : undefined },
+        ...(segments.length > 1 ? [{ label: title }] : []),
+      ]);
 ---
 
 <!doctype html>
-<html lang="en">
+<html lang="en-GB">
   <head>
     <meta charset="UTF-8" />
     <meta name="description" content={description} />
-    <meta name="viewport" content="width=device-width" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="generator" content={Astro.generator} />
+    <meta name="theme-color" content="#DDE1E0" />
     <title>{fullTitle}</title>
     {noindex ? <meta name="robots" content="noindex" /> : <link rel="canonical" href={canonical} />}
     <link rel="sitemap" href="/sitemap-index.xml" />
@@ -71,64 +96,303 @@ const enableAnalytics = import.meta.env.PROD && umamiSrc && umamiWebsiteId;
     )}
   </head>
   <body>
-    <header>
-      <nav>
-        <a href="/" class="logo">
-          <div class="logo-mark">&lt;/&gt;</div>
-          <span class="logo-text">WebDevRock</span>
-        </a>
-        <div class="nav-links">
-          <a href="/patterns">Patterns</a>
-          <a href="/snippets">Snippets</a>
-          <a href="/tools">Tools</a>
-          <a href="/ai">AI &amp; LLMs</a>
-          <a href="/experiments">Experiments</a>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <div class="frame">
+      <aside class="side" data-side>
+        <div class="side-top">
+          <a href="/" class="wordmark"><span class="mark">&lt;/&gt;</span>WebDevRock</a>
+          <a href="/search/" class="phone-search" data-search-open aria-label="Search">
+            <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.5-3.5"></path></svg>
+          </a>
+          <button type="button" class="menu-button" aria-expanded="false" aria-controls="side-body" data-menu-button>
+            <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h16"></path></svg>
+            <span class="visually-hidden">Menu</span>
+          </button>
         </div>
-        <div class="nav-search">
-          <Search />
+
+        <div class="side-body" id="side-body">
+          <div class="side-search"><Search /></div>
+
+          <nav aria-label="Sections">
+            <p class="micro-label side-label">Sections</p>
+            <ul class="side-sections">
+              {SECTIONS.map((s) => {
+                const inSection = pages.filter((p) => p.section === s.key);
+                const isCurrent = s.key === currentSection?.key;
+                return (
+                  <li>
+                    <a
+                      href={`/${s.key}/`}
+                      class="side-section"
+                      style={`--type-fg: ${s.accent}; --type-bg: ${s.tint}`}
+                      aria-current={isCurrent && segments.length === 1 ? 'page' : undefined}
+                      data-umami-event="nav-click"
+                      data-umami-event-target={s.key}
+                    >
+                      <span class="glyph" aria-hidden="true">{s.glyph}</span>
+                      <span>{s.name}</span>
+                      <span class="count">{inSection.length}</span>
+                    </a>
+                    {isCurrent && (
+                      <ul class="side-pages">
+                        {inSection.map((p) => (
+                          <li>
+                            <a href={p.path} aria-current={p.path === path ? 'page' : undefined}>{shortTitle(p.frontmatter.title)}</a>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
+            <a href="/tags/" class="side-extra" aria-current={segments[0] === 'tags' && segments.length === 1 ? 'page' : undefined}>
+              <span class="glyph" aria-hidden="true">#</span>Browse by tag
+            </a>
+          </nav>
+
+          <div class="side-foot">
+            <a href="/llms.txt">llms.txt</a>
+            <a href="/rss.xml" data-umami-event="rss-click" data-umami-event-target="sidebar">RSS</a>
+          </div>
         </div>
-      </nav>
-    </header>
-    <main>
-      <slot />
-    </main>
-    <footer>
-      <p>
-        &copy; 2026 webdevrock.uk
-        <span aria-hidden="true">·</span>
-        <a href="/rss.xml" data-umami-event="rss-click" data-umami-event-target="footer">RSS feed</a>
-      </p>
-    </footer>
+      </aside>
+
+      <div class="main-col">
+        <div class="topbar">
+          <nav class="crumbs" aria-label="Breadcrumb">
+            {segments.length === 0 ? <span class="here">Home</span> : <a href="/">Home</a>}
+            {crumbs.map((c) => (
+              <>
+                <span class="sep" aria-hidden="true">/</span>
+                {c.href ? <a href={c.href}>{c.label}</a> : <span class="here" aria-current="page">{c.label}</span>}
+              </>
+            ))}
+          </nav>
+        </div>
+
+        <main id="main" class="main">
+          <slot />
+        </main>
+
+        <footer class="footer">
+          <p>
+            Written from day-to-day work on operational systems: SQL Server, integrations, and the tools around them.
+            Every page is also available as Markdown for AI tools: see <a href="/llms.txt">llms.txt</a>.
+          </p>
+          <p class="micro-label">
+            &copy; 2026 webdevrock.uk · <a href="/rss.xml" data-umami-event="rss-click" data-umami-event-target="footer">RSS feed</a>
+          </p>
+        </footer>
+      </div>
+    </div>
+
+    <script>
+      // On small screens the sidebar folds behind the menu button
+      const button = document.querySelector<HTMLButtonElement>('[data-menu-button]');
+      const side = document.querySelector<HTMLElement>('[data-side]');
+      button?.addEventListener('click', () => {
+        const open = side?.classList.toggle('open') ?? false;
+        button.setAttribute('aria-expanded', String(open));
+      });
+    </script>
   </body>
 </html>
 
 <style is:global>
-  .logo-mark {
-    width: 36px;
-    height: 36px;
-    background: var(--gradient-1);
-    border-radius: 8px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-family: var(--font-mono);
-    font-weight: 600;
-    font-size: 1.1rem;
-    color: var(--bg-deep);
+  .skip-link {
+    position: absolute;
+    top: 8px;
+    left: 8px;
+    z-index: 100;
+    padding: 8px 12px;
+    border-radius: var(--radius-md);
+    background: var(--surface-inverse);
+    color: var(--text-inverse);
+    transform: translateY(-200%);
   }
 
-  footer a {
-    color: var(--text-secondary);
+  .skip-link:focus { transform: none; color: var(--text-inverse); }
+
+  .frame {
+    display: grid;
+    grid-template-columns: var(--side-w) minmax(0, 1fr);
+    min-height: 100vh;
+  }
+
+  /* ---- Sidebar */
+
+  .side {
+    position: sticky;
+    top: 0;
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    border-right: 1px solid var(--border-subtle);
+    background: var(--surface-side);
+  }
+
+  .side-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 18px 20px 14px;
+  }
+
+  .wordmark {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 0.45em;
+    color: var(--text-strong);
+    font-size: 18px;
+    font-weight: 700;
+    letter-spacing: -0.01em;
     text-decoration: none;
   }
 
-  footer a:hover {
-    color: var(--accent-amber);
+  .wordmark:hover { color: var(--text-strong); }
+  .wordmark .mark { color: var(--accent); font-family: var(--font-mono); font-weight: 600; }
+
+  .menu-button,
+  .phone-search {
+    display: none;
+    place-items: center;
+    width: 40px;
+    height: 40px;
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-md);
+    background: var(--surface-raised);
+    color: var(--text-strong);
+    cursor: pointer;
   }
 
-  .logo-text {
+  .side-body {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+    padding: 0 12px 16px;
+    overflow-y: auto;
+  }
+
+  .side-search { margin: 0 8px 18px; }
+  .side-label { padding: 0 8px 6px; }
+  .side-sections, .side-pages { list-style: none; }
+
+  .side-section, .side-extra {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 8px;
+    border-radius: var(--radius-md);
+    color: var(--text-strong);
+    font-size: 14.5px;
     font-weight: 600;
-    font-size: 1.1rem;
-    letter-spacing: -0.02em;
+    text-decoration: none;
+    transition: background var(--dur-fast) var(--ease-out);
+  }
+
+  .side-section:hover, .side-extra:hover { background: var(--surface-card); color: var(--text-strong); }
+  .side-section[aria-current='page'], .side-extra[aria-current='page'] { background: var(--surface-card); box-shadow: inset 0 0 0 1px var(--border-subtle); }
+
+  .side .glyph {
+    display: grid;
+    place-items: center;
+    flex: none;
+    width: 26px;
+    height: 22px;
+    border-radius: var(--radius-sm);
+    background: var(--type-bg);
+    color: var(--type-fg);
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    font-weight: 600;
+  }
+
+  .side-extra { margin-top: 6px; }
+  .side-extra .glyph { --type-bg: var(--stone-200); --type-fg: var(--ink-700); }
+  .side .count { margin-left: auto; color: var(--text-muted); font-family: var(--font-mono); font-size: 12px; font-weight: 400; }
+
+  .side-pages { margin: 2px 0 8px 21px; padding-left: 10px; border-left: 1px solid var(--border-default); }
+
+  .side-pages a {
+    display: block;
+    padding: 4px 8px;
+    border-radius: var(--radius-sm);
+    color: var(--text-muted);
+    font-size: 13.5px;
+    line-height: 1.35;
+    text-decoration: none;
+  }
+
+  .side-pages a:hover { background: var(--surface-card); color: var(--text-strong); }
+  .side-pages a[aria-current='page'] { background: var(--accent-tint); color: var(--verdigris-700); font-weight: 600; }
+
+  .side-foot {
+    display: flex;
+    gap: 16px;
+    margin-top: auto;
+    padding: 16px 8px 0;
+    border-top: 1px solid var(--border-subtle);
+    font-size: 13.5px;
+  }
+
+  .side-foot a { color: var(--text-muted); text-decoration: none; }
+  .side-foot a:hover { color: var(--text-strong); }
+
+  /* ---- Main column */
+
+  .topbar {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    display: flex;
+    align-items: center;
+    height: var(--topbar-h);
+    padding: 0 40px;
+    border-bottom: 1px solid var(--border-subtle);
+    background: var(--surface-header);
+    backdrop-filter: blur(10px);
+  }
+
+  .crumbs { display: flex; align-items: center; gap: 8px; min-width: 0; color: var(--text-muted); font-size: 14px; white-space: nowrap; }
+  .crumbs a { color: var(--text-muted); text-decoration: none; }
+  .crumbs a:hover { color: var(--text-strong); }
+  .crumbs .here { overflow: hidden; color: var(--text-strong); font-weight: 500; text-overflow: ellipsis; }
+  .crumbs .sep { color: var(--text-muted); }
+
+  .main { padding: 40px 40px 0; }
+
+  .footer {
+    max-width: var(--content-max);
+    margin: 96px 40px 0;
+    padding: 28px 0 40px;
+    border-top: 1px solid var(--border-subtle);
+    color: var(--text-muted);
+    font-size: var(--fs-small);
+  }
+
+  .footer p:first-child { max-width: 62ch; }
+  .footer .micro-label { margin-top: 10px; }
+
+  @media (max-width: 960px) {
+    .frame { grid-template-columns: minmax(0, 1fr); }
+
+    .side {
+      position: sticky;
+      z-index: 30;
+      height: auto;
+      border-right: 0;
+      border-bottom: 1px solid var(--border-subtle);
+    }
+
+    .side-top { padding: 10px 16px; }
+    .menu-button, .phone-search { display: grid; }
+    .phone-search { margin-left: auto; margin-right: 8px; }
+    .side-body { display: none; max-height: calc(100vh - 62px); }
+    .side.open .side-body { display: flex; }
+    .topbar { position: static; padding: 0 16px; }
+    .main { padding: 24px 16px 0; }
+    .footer { margin: 72px 16px 0; }
   }
 </style>

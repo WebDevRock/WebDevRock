@@ -112,10 +112,9 @@ const placeholders = Astro.props.placeholders.map((p) => ({ ...p, token: String(
   .placeholder-panel {
     margin: 1.5rem 0;
     padding: 1.25rem 1.5rem;
-    background: var(--bg-surface);
+    background: var(--surface-card);
     border: 1px solid var(--border-subtle);
-    border-left: 3px solid var(--accent-amber);
-    border-radius: 10px;
+      border-radius: 10px;
   }
 
   .placeholder-panel[hidden] {
@@ -132,12 +131,12 @@ const placeholders = Astro.props.placeholders.map((p) => ({ ...p, token: String(
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.08em;
-    color: var(--accent-amber);
+    color: var(--type-snippets-fg);
   }
 
   .panel-intro {
     margin-top: 0.25rem;
-    color: var(--text-secondary);
+    color: var(--text-body);
     font-size: 0.9rem;
   }
 
@@ -157,16 +156,16 @@ const placeholders = Astro.props.placeholders.map((p) => ({ ...p, token: String(
   .field-label {
     font-size: 0.8rem;
     font-weight: 500;
-    color: var(--text-secondary);
+    color: var(--text-body);
   }
 
   .field input {
     width: 100%;
     padding: 0.45rem 0.6rem;
-    background: var(--bg-deep);
-    border: 1px solid var(--border);
+    background: var(--surface-raised);
+    border: 1px solid var(--border-default);
     border-radius: 6px;
-    color: var(--text-primary);
+    color: var(--text-strong);
     font-family: var(--font-mono);
     font-size: 0.85rem;
   }
@@ -177,7 +176,7 @@ const placeholders = Astro.props.placeholders.map((p) => ({ ...p, token: String(
 
   .field input:focus {
     outline: none;
-    border-color: var(--accent-amber);
+    border-color: var(--type-snippets-fg);
   }
 
   .field-hint {
@@ -196,16 +195,16 @@ const placeholders = Astro.props.placeholders.map((p) => ({ ...p, token: String(
 
   .panel-status {
     font-size: 0.8rem;
-    color: var(--accent-amber);
+    color: var(--type-snippets-fg);
   }
 
   .reset {
     margin-left: auto;
     padding: 0.3rem 0.7rem;
     background: none;
-    border: 1px solid var(--border);
+    border: 1px solid var(--border-default);
     border-radius: 6px;
-    color: var(--text-secondary);
+    color: var(--text-body);
     font-family: var(--font-mono);
     font-size: 0.75rem;
     cursor: pointer;
@@ -213,21 +212,30 @@ const placeholders = Astro.props.placeholders.map((p) => ({ ...p, token: String(
 
   .reset:hover,
   .reset:focus-visible {
-    border-color: var(--accent-amber);
-    color: var(--text-primary);
+    border-color: var(--type-snippets-fg);
+    color: var(--text-strong);
   }
 </style>
 
 <style is:global>
   /* Placeholder names inside code: underlined so readers can see what the panel changes */
   .content code .ph {
-    text-decoration: underline dotted color-mix(in srgb, var(--accent-amber) 70%, transparent);
+    text-decoration: underline dotted var(--type-snippets-fg);
     text-underline-offset: 3px;
   }
 
   .content code .ph.ph-custom {
-    background: color-mix(in srgb, var(--accent-amber) 18%, transparent);
+    background: var(--type-snippets-bg);
     border-radius: 2px;
     text-decoration: none;
+  }
+
+  /* In the dark code blocks: the syntax palette's light ochre */
+  .content pre code .ph {
+    text-decoration-color: var(--syn-number);
+  }
+
+  .content pre code .ph.ph-custom {
+    background: rgba(226, 189, 115, .2);
   }
 </style>

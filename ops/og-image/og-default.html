@@ -1,0 +1,89 @@
+<!doctype html>
+<!-- Source for public/og-default.png (1200×630). Regenerate with: node ops/og-image/render.mjs
+     Uses the site's design tokens (src/styles/tokens.css) and fonts; the code is from the reversible data fix pattern. -->
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<title>WebDevRock share image</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Newsreader:ital,opsz,wght@1,6..72,500&display=block">
+<style>
+  :root {
+    --stone-0: #F4F5F3; --stone-50: #ECEEEC; --stone-100: #E5E8E6; --stone-150: #DDE1E0; --stone-200: #D2D7D6; --stone-300: #C1C7C6;
+    --ink-900: #1E2528; --ink-800: #283033; --ink-700: #3A4446; --ink-500: #5C6461;
+    --verdigris-500: #1F6F6A; --verdigris-600: #1A5E59; --verdigris-100: #CFE0DA;
+    --ochre-600: #7A4F0E; --ochre-100: #EBDDBF;
+    --brick-600: #8E3A24; --brick-100: #EDD3C7;
+    --plum-600: #5C3F78; --plum-100: #DDD3E4;
+    --olive-600: #4B5A1D; --olive-100: #DCE0C3;
+    --syn-text: #EAE6DD; --syn-keyword: #8FCBBE; --syn-string: #E8A88F; --syn-number: #E2BD73; --syn-comment: #8C8E86; --syn-muted: #B3AC9C;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html, body { width: 1200px; height: 630px; overflow: hidden; }
+
+  body {
+    display: grid;
+    grid-template-columns: 1fr 460px;
+    gap: 56px;
+    align-items: center;
+    padding: 64px 72px;
+    background: var(--stone-150);
+    color: var(--ink-700);
+    font-family: 'Instrument Sans', sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wordmark { display: flex; align-items: baseline; gap: 12px; color: var(--ink-900); font-size: 34px; font-weight: 700; letter-spacing: -0.01em; }
+  .wordmark .mark { color: var(--verdigris-500); font-family: 'JetBrains Mono', monospace; font-weight: 600; }
+
+  h1 { margin-top: 56px; color: var(--ink-900); font-size: 64px; line-height: 1.04; letter-spacing: -0.03em; font-weight: 700; }
+  h1 em { color: var(--verdigris-500); font-family: 'Newsreader', serif; font-weight: 500; letter-spacing: -0.015em; }
+
+  .sections { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 40px; }
+  .chip { padding: 5px 11px; border-radius: 4px; font-family: 'JetBrains Mono', monospace; font-size: 17px; font-weight: 500; letter-spacing: 0.04em; text-transform: uppercase; }
+  .patterns { background: var(--verdigris-100); color: var(--verdigris-600); }
+  .snippets { background: var(--ochre-100); color: var(--ochre-600); }
+  .tools { background: var(--brick-100); color: var(--brick-600); }
+  .ai { background: var(--plum-100); color: var(--plum-600); }
+  .experiments { background: var(--olive-100); color: var(--olive-600); }
+
+  .code { border-radius: 16px; background: var(--ink-900); box-shadow: 0 30px 60px -24px rgba(30, 37, 40, .45); overflow: hidden; }
+  .bar { display: flex; justify-content: space-between; padding: 12px 20px; background: var(--ink-800); color: var(--syn-muted); font-family: 'JetBrains Mono', monospace; font-size: 15px; letter-spacing: 0.06em; text-transform: uppercase; }
+  pre { padding: 22px 24px 26px; color: var(--syn-text); font-family: 'JetBrains Mono', monospace; font-size: 19px; line-height: 1.7; }
+  .k { color: var(--syn-keyword); }
+  .s { color: var(--syn-string); }
+  .n { color: var(--syn-number); }
+  .c { color: var(--syn-comment); font-style: italic; }
+
+  .site { position: absolute; right: 72px; bottom: 40px; color: var(--ink-500); font-family: 'JetBrains Mono', monospace; font-size: 20px; }
+</style>
+</head>
+<body>
+  <div>
+    <div class="wordmark"><span class="mark">&lt;/&gt;</span>WebDevRock</div>
+    <h1>Practical patterns for <em>real-world</em> development</h1>
+    <div class="sections">
+      <span class="chip patterns">## Patterns</span>
+      <span class="chip snippets">{} Snippets</span>
+      <span class="chip tools">&gt;_ Tools</span>
+      <span class="chip ai">AI guides</span>
+    </div>
+  </div>
+
+  <div class="code">
+    <div class="bar"><span>sql</span><span>Copy</span></div>
+<pre><span class="c">-- 1) Back up the rows first</span>
+<span class="k">SELECT</span> t.*
+<span class="k">INTO</span> DataFix_INC1234
+<span class="k">FROM</span> dbo.Orders t
+<span class="k">WHERE</span> t.Status = <span class="s">'Closed'</span>
+  <span class="k">AND</span> t.ClosedDate &lt; <span class="s">'2024-01-01'</span>;
+
+<span class="c">-- 2) Then change them</span>
+<span class="k">UPDATE TOP</span> (<span class="n">4000</span>) t ...</pre>
+  </div>
+
+  <span class="site">webdevrock.uk</span>
+</body>
+</html>

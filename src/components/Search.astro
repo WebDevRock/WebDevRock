@@ -25,9 +25,9 @@
   import { mountSearch } from '../scripts/search';
 
   const dialog = document.querySelector<HTMLDialogElement>('[data-search-dialog]');
-  const trigger = document.querySelector<HTMLAnchorElement>('[data-search-open]');
+  const triggers = document.querySelectorAll<HTMLAnchorElement>('[data-search-open]'); // sidebar field, and the phone header button
 
-  if (dialog && trigger) {
+  if (dialog && triggers.length) {
     const open = (from: string) => {
       if (dialog.open) return;
       dialog.showModal();
@@ -35,10 +35,12 @@
       mountSearch('#search-dialog-ui', 'dialog');
     };
 
-    trigger.addEventListener('click', (event) => {
-      event.preventDefault();
-      open('button');
-    });
+    triggers.forEach((trigger) =>
+      trigger.addEventListener('click', (event) => {
+        event.preventDefault();
+        open('button');
+      }),
+    );
 
     document.querySelector('[data-search-close]')?.addEventListener('click', () => dialog.close());
 
@@ -60,33 +62,27 @@
 
 <style>
   .search-trigger {
-    display: inline-flex;
+    display: flex;
     align-items: center;
-    gap: 0.5rem;
-    padding: 0.4rem 0.6rem 0.4rem 0.75rem;
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    background: var(--bg-surface);
-    color: var(--text-secondary);
-    font-size: 0.875rem;
+    gap: 8px;
+    padding: 7px 8px 7px 10px;
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-md);
+    background: var(--surface-raised);
+    box-shadow: var(--shadow-inset);
+    color: var(--text-muted);
+    font-size: 14px;
     text-decoration: none;
-    white-space: nowrap;
-    transition: border-color 0.2s ease, color 0.2s ease;
+    transition: border-color var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
   }
 
-  .search-trigger:hover,
-  .search-trigger:focus-visible {
-    border-color: var(--accent-cyan);
-    color: var(--text-primary);
+  .search-trigger:hover {
+    border-color: var(--border-strong);
+    color: var(--text-body);
   }
 
   .search-trigger kbd {
-    padding: 0 0.4rem;
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    font-family: var(--font-mono);
-    font-size: 0.75rem;
-    color: var(--text-muted);
+    margin-left: auto;
   }
 
   .search-dialog {
@@ -94,11 +90,11 @@
     max-height: min(80vh, 760px);
     margin: 10vh auto auto;
     padding: 0;
-    background: var(--bg-surface);
-    color: var(--text-primary);
-    border: 1px solid var(--border);
-    border-radius: 16px;
-    box-shadow: 0 30px 80px rgba(0, 0, 0, 0.6);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-lg);
+    background: var(--surface-raised);
+    color: var(--text-body);
+    box-shadow: var(--shadow-pop);
     overflow: hidden;
   }
 
@@ -108,51 +104,47 @@
   }
 
   .search-dialog::backdrop {
-    background: rgba(0, 0, 0, 0.6);
-    backdrop-filter: blur(4px);
+    background: var(--surface-overlay);
+    backdrop-filter: blur(3px);
   }
 
   .search-dialog-header {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 0.875rem 1.25rem;
+    padding: 12px 16px;
     border-bottom: 1px solid var(--border-subtle);
+    background: var(--surface-card);
   }
 
   .search-dialog-header h2 {
-    font-family: var(--font-mono);
-    font-size: 0.8rem;
-    font-weight: 500;
     color: var(--text-muted);
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    font-weight: 500;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
   }
 
   .search-close {
-    padding: 0.2rem 0.5rem;
-    background: var(--bg-elevated);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    color: var(--text-secondary);
+    min-width: 44px;
+    min-height: 32px;
+    padding: 2px 8px;
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-sm);
+    background: var(--surface-raised);
+    color: var(--text-body);
     font-family: var(--font-mono);
-    font-size: 0.75rem;
+    font-size: 12px;
     cursor: pointer;
   }
 
   .search-dialog .search-ui {
-    padding: 1rem 1.25rem 1.25rem;
+    padding: 16px;
     overflow-y: auto;
   }
 
-  @media (max-width: 768px) {
-    .search-trigger-label,
-    .search-trigger kbd {
-      display: none;
-    }
-
-    .search-trigger {
-      padding: 0.45rem;
-    }
-
+  @media (max-width: 960px) {
     .search-dialog {
       margin-top: 1rem;
       max-height: calc(100vh - 2rem);
@@ -161,37 +153,46 @@
 </style>
 
 <style is:global>
-  /* Pagefind UI, themed with the site palette (used by the dialog and /search/) */
+  /* Pagefind UI, themed with the design tokens (used by the dialog and /search/) */
   .search-ui {
     --pagefind-ui-scale: 0.85;
-    --pagefind-ui-primary: var(--accent-cyan);
-    --pagefind-ui-text: var(--text-primary);
-    --pagefind-ui-background: var(--bg-deep);
-    --pagefind-ui-border: var(--border);
-    --pagefind-ui-tag: var(--bg-elevated);
+    --pagefind-ui-primary: var(--accent);
+    --pagefind-ui-text: var(--text-strong);
+    --pagefind-ui-background: var(--surface-raised);
+    --pagefind-ui-border: var(--border-default);
+    --pagefind-ui-tag: var(--surface-card);
     --pagefind-ui-border-width: 1px;
-    --pagefind-ui-border-radius: 10px;
+    --pagefind-ui-border-radius: 7px;
     --pagefind-ui-font: var(--font-sans);
   }
 
   .search-ui .pagefind-ui__result-link {
-    color: var(--text-primary);
+    color: var(--text-strong);
+  }
+
+  .search-ui .pagefind-ui__result-link:hover {
+    color: var(--text-link-hover);
   }
 
   .search-ui .pagefind-ui__result-excerpt,
   .search-ui .pagefind-ui__message {
-    color: var(--text-secondary);
+    color: var(--text-body);
+  }
+
+  .search-ui .pagefind-ui__filter-name,
+  .search-ui .pagefind-ui__filter-label {
+    color: var(--text-body);
   }
 
   /* More specific than Pagefind's own ".pagefind-ui--reset mark", which loads later */
   .search-ui .pagefind-ui--reset mark {
-    background: color-mix(in srgb, var(--accent-cyan) 25%, transparent);
-    color: var(--text-primary);
+    background: var(--accent-tint);
+    color: var(--verdigris-700);
     border-radius: 2px;
   }
 
   .search-unavailable {
     color: var(--text-muted);
-    font-size: 0.9rem;
+    font-size: var(--fs-small);
   }
 </style>

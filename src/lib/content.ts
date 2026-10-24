@@ -8,6 +8,7 @@ export type Frontmatter = {
   updated?: string;
   sqlVersion?: string; // earliest SQL Server version the page's SQL runs on, e.g. "2016" (see SQL_VERSIONS)
   sqlNote?: string;    // extra requirement shown with the version, e.g. a compatibility level
+  level?: string;      // AI guides: beginner | intermediate | advanced
 };
 
 export type ContentPage = {
@@ -22,7 +23,8 @@ export type Section = {
   name: string;
   singular: string;
   description: string;
-  accent: string; // CSS colour from global.css
+  accent: string; // CSS colour for the section's label text (tokens.css --type-*-fg)
+  tint: string;   // CSS colour for the section's label background (--type-*-bg)
   glyph: string;  // short mono label used on tiles
 };
 
@@ -30,11 +32,21 @@ export const SITE = (import.meta.env.SITE ?? 'https://webdevrock.uk').replace(/\
 
 // Same order as the site navigation
 export const SECTIONS: Section[] = [
-  { key: 'patterns', name: 'Patterns', singular: 'Pattern', description: 'Higher-level engineering approaches: integration pipelines, data fixes, audit trails, and operational design.', accent: 'var(--accent-coral)', glyph: '##' },
-  { key: 'snippets', name: 'Snippets', singular: 'Snippet', description: 'Small copy/paste solutions with short explanations, mostly SQL Server.', accent: 'var(--accent-amber)', glyph: '{}' },
-  { key: 'tools', name: 'Tools', singular: 'Tool', description: 'Browser-based utilities for SQL Server and integration work.', accent: 'var(--accent-cyan)', glyph: '>_' },
-  { key: 'ai', name: 'AI & LLMs', singular: 'AI guide', description: 'Practical guides on AI agents, local LLMs, and automation workflows.', accent: 'var(--accent-violet)', glyph: 'AI' },
-  { key: 'experiments', name: 'Experiments', singular: 'Experiment', description: 'Visual and technical experiments.', accent: 'var(--accent-lime)', glyph: '~/' },
+  { key: 'patterns', name: 'Patterns', singular: 'Pattern', description: 'Higher-level engineering approaches: integration pipelines, data fixes, audit trails, and operational design.', accent: 'var(--type-patterns-fg)', tint: 'var(--type-patterns-bg)', glyph: '##' },
+  { key: 'snippets', name: 'Snippets', singular: 'Snippet', description: 'Small copy/paste solutions with short explanations, mostly SQL Server.', accent: 'var(--type-snippets-fg)', tint: 'var(--type-snippets-bg)', glyph: '{}' },
+  { key: 'tools', name: 'Tools', singular: 'Tool', description: 'Browser-based utilities for SQL Server and integration work.', accent: 'var(--type-tools-fg)', tint: 'var(--type-tools-bg)', glyph: '>_' },
+  { key: 'ai', name: 'AI & LLMs', singular: 'AI guide', description: 'Practical guides on AI agents, local LLMs, and automation workflows.', accent: 'var(--type-ai-fg)', tint: 'var(--type-ai-bg)', glyph: 'AI' },
+  { key: 'experiments', name: 'Experiments', singular: 'Experiment', description: 'Visual and technical experiments.', accent: 'var(--type-experiments-fg)', tint: 'var(--type-experiments-bg)', glyph: '~/' },
+];
+
+// "What are you trying to do?" entry points on the homepage
+export const HOME_TASKS = [
+  { label: 'Fix data in production without risking it', path: '/patterns/sql-reversible-data-fix/' },
+  { label: 'Update or delete millions of rows', path: '/snippets/sql-batch-update-delete/' },
+  { label: 'Turn a spreadsheet list into SQL', path: '/tools/list-to-sql/' },
+  { label: 'Read a JSON payload in SQL Server', path: '/tools/json-to-openjson/' },
+  { label: 'Stop an integration creating duplicates', path: '/patterns/integration-jobs-safe-to-rerun/' },
+  { label: 'Retry a flaky API without hammering it', path: '/patterns/handling-unreliable-external-apis/' },
 ];
 
 // Guided reading orders, shown on the homepage and as "next step" links on each page in them
@@ -98,6 +110,7 @@ export function parseFrontmatter(source: string, file: string): Frontmatter {
     updated: typeof data.updated === 'string' ? data.updated : undefined,
     sqlVersion: typeof data.sqlVersion === 'string' ? checkSqlVersion(data.sqlVersion, file) : undefined,
     sqlNote: typeof data.sqlNote === 'string' ? data.sqlNote : undefined,
+    level: typeof data.level === 'string' ? data.level : undefined,
   };
 }
 

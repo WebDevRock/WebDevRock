@@ -96,14 +96,15 @@ Navigation events, sent with `data-umami-event` attributes or from the search sc
 
 | Event | Fired from | Data |
 |---|---|---|
-| `home-click` | Homepage hero buttons, task panel, section tiles, learning paths, tool tiles | `target` (e.g. `task-list-to-sql`, `section-patterns`) |
+| `nav-click` | Section links in the sidebar | `target` (section key, e.g. `patterns`) |
+| `home-click` | Homepage palette (tasks, and pages it finds), learning paths, tools and section tiles | `target` (e.g. `task-list-to-sql`, `palette-sql-pass-id-list`, `section-patterns`) |
 | `page-list-click` | Page lists: homepage "Recently updated" and tag pages | `target` (`recent-<slug>`, `tag-<tag>-<slug>`) |
 | `search` | Search dialog and `/search/` | `action` (`open`, `result`), `from` (`button`, `shortcut`, `dialog`, `page`), `target` (result path) |
 | `tag-click` | Tag links on pages, the tags index and related tags | `target` |
 | `next-step-click` | Learning path previous/next links at the end of a page | `target` (`next-<slug>`, `previous-<slug>`, `path-complete`) |
 | `related-click` | Related links at the end of a page | `target` (slug) |
 | `toc-click` | "On this page" contents on pattern pages and AI guides | `target` (heading id) |
-| `rss-click` | RSS feed link in the footer | `target` (`footer`) |
+| `rss-click` | RSS feed links | `target` (`footer`, `sidebar`) |
 | `not-found` | Every view of the 404 page | `path` (the missing URL), `referrer` (hostname or `direct`) |
 | `not-found-click` | Section, home, tags and learning-path links on the 404 page | `target` |
 

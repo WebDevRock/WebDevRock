@@ -1,26 +1,34 @@
 ---
-// Small coloured label naming a page's section, e.g. "Pattern"
+// Tinted label naming a page's section, e.g. "Pattern", or "## Pattern" with its glyph
 import { getSection } from '../lib/content';
 
 interface Props {
   section: string;
+  glyph?: boolean;
 }
 
 const section = getSection(Astro.props.section);
 ---
 
-<span class="type-label" style={`--accent: ${section.accent}`}>{section.singular}</span>
+<span class="type-label" style={`--type-fg: ${section.accent}; --type-bg: ${section.tint}`}>
+  {Astro.props.glyph && <span aria-hidden="true">{section.glyph} </span>}{section.singular}
+</span>
 
 <style>
   .type-label {
+    display: inline-flex;
     flex-shrink: 0;
-    padding: 0.15rem 0.5rem;
-    border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
-    border-radius: 6px;
-    color: var(--accent);
+    align-self: flex-start;
+    padding: 2px 7px;
+    border-radius: var(--radius-xs);
+    background: var(--type-bg);
+    color: var(--type-fg);
     font-family: var(--font-mono);
-    font-size: 0.7rem;
+    font-size: 11.5px;
+    font-weight: 500;
     line-height: 1.5;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
     white-space: nowrap;
   }
 </style>

@@ -1,0 +1,299 @@
+/* Article prose for MDX content pages (ContentLayout's .content), including what the pattern pages used to
+   style themselves: jargon tooltips, numbered stage lists and the before/after comparison. */
+
+.content {
+  color: var(--text-body);
+  line-height: var(--lh-body);
+}
+
+.content > * + * {
+  margin-top: 1em;
+}
+
+.content h2 {
+  margin-top: 44px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-subtle);
+  color: var(--text-strong);
+  font-size: 24px;
+  line-height: var(--lh-h2);
+  letter-spacing: var(--ls-h2);
+  font-weight: 650;
+}
+
+.content > h2:first-child {
+  margin-top: 8px;
+  padding-top: 0;
+  border-top: 0;
+}
+
+.content h3 {
+  margin-top: 32px;
+  color: var(--text-strong);
+  font-size: 18px;
+  line-height: var(--lh-h3);
+  font-weight: 600;
+}
+
+.content h2 + *,
+.content h3 + * {
+  margin-top: 12px;
+}
+
+/* Clear the sticky top bar when jumping to a heading */
+.content h2,
+.content h3 {
+  scroll-margin-top: calc(var(--topbar-h) + 24px);
+}
+
+.content ul,
+.content ol {
+  padding-left: 1.3em;
+}
+
+.content li + li {
+  margin-top: 6px;
+}
+
+.content li::marker {
+  color: var(--text-muted);
+}
+
+.content strong {
+  color: var(--text-strong);
+  font-weight: 600;
+}
+
+.content :not(pre) > code {
+  padding: 1px 5px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-xs);
+  background: var(--surface-raised);
+  color: var(--text-strong);
+  font-size: var(--fs-code-inline);
+}
+
+.content blockquote {
+  padding: 12px 16px;
+  border-radius: var(--radius-md);
+  background: var(--surface-card);
+  color: var(--text-body);
+}
+
+.content hr {
+  border: 0;
+  border-top: 1px solid var(--border-default);
+}
+
+.content table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--fs-small);
+}
+
+.content th,
+.content td {
+  padding: 8px 10px 8px 0;
+  border-bottom: 1px solid var(--border-subtle);
+  text-align: left;
+  vertical-align: top;
+}
+
+.content th {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  font-weight: 500;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+/* ---- Code blocks: Shiki's css-variables theme (astro.config.mjs) mapped to the dark syntax palette */
+
+.content pre.astro-code {
+  --astro-code-color-text: var(--syn-text);
+  --astro-code-color-background: var(--surface-code);
+  --astro-code-token-keyword: var(--syn-keyword);
+  --astro-code-token-string: var(--syn-string);
+  --astro-code-token-string-expression: var(--syn-string);
+  --astro-code-token-constant: var(--syn-number);
+  --astro-code-token-comment: var(--syn-comment);
+  --astro-code-token-function: var(--syn-function);
+  --astro-code-token-parameter: var(--syn-type);
+  --astro-code-token-punctuation: var(--syn-punct);
+  --astro-code-token-link: var(--syn-function);
+  overflow-x: auto;
+  padding: 16px 18px;
+  border-radius: var(--radius-lg);
+  font-size: var(--fs-code);
+  line-height: var(--lh-code);
+}
+
+.content pre.astro-code code {
+  font-family: var(--font-mono);
+}
+
+/* Caption bar added by ContentLayout's script: language label and Copy */
+.content .code-block {
+  overflow: hidden;
+  border: 1px solid var(--ink-800);
+  border-radius: var(--radius-lg);
+  background: var(--surface-code);
+}
+
+.content .code-block pre.astro-code {
+  margin: 0;
+  border-radius: 0;
+}
+
+.content .code-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 5px 8px 5px 14px;
+  background: var(--surface-code-bar);
+}
+
+.content .code-bar .code-language {
+  color: var(--syn-muted);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  font-weight: 500;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.content .copy-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 28px;
+  padding: 3px 9px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--syn-muted);
+  font: 500 12.5px var(--font-sans);
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
+}
+
+.content .copy-button:hover {
+  background: rgba(255, 255, 255, .08);
+  color: var(--stone-0);
+}
+
+.content .copy-button.copied {
+  color: var(--syn-keyword);
+}
+
+/* ---- Jargon tooltips (pattern pages): a dotted underline, the explanation on hover or focus */
+
+.content .jargon {
+  position: relative;
+  border-bottom: 1px dotted var(--text-muted);
+  cursor: help;
+}
+
+.content .jargon:hover::after,
+.content .jargon:focus::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 6px);
+  z-index: 5;
+  width: max-content;
+  max-width: min(260px, 70vw);
+  padding: 6px 9px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-inverse);
+  color: var(--text-inverse);
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 1.4;
+  box-shadow: var(--shadow-pop);
+}
+
+/* ---- Numbered stages (integration and status-table patterns) */
+
+.content .stage-list {
+  padding-left: 0;
+  list-style: none;
+  counter-reset: stage;
+}
+
+.content .stage-list li {
+  position: relative;
+  padding-left: 36px;
+  counter-increment: stage;
+}
+
+.content .stage-list li::before {
+  content: counter(stage);
+  position: absolute;
+  top: 1px;
+  left: 0;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: var(--accent-tint);
+  color: var(--verdigris-700);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+/* ---- Before/after comparison: a tinted label says which is which */
+
+.content .comparison {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.content .comparison-item {
+  padding: 16px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  background: var(--surface-card);
+}
+
+.content .comparison-item pre {
+  overflow-x: auto;
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  background: var(--surface-code);
+  color: var(--syn-text);
+  font-size: var(--fs-code);
+}
+
+.content .comparison-label {
+  display: inline-block;
+  margin-bottom: 12px;
+  padding: 2px 8px;
+  border-radius: var(--radius-xs);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  font-weight: 500;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.content .bad .comparison-label {
+  background: var(--danger-bg);
+  color: var(--danger-fg);
+}
+
+.content .good .comparison-label {
+  background: var(--success-bg);
+  color: var(--success-fg);
+}
+
+@media (max-width: 640px) {
+  .content .comparison {
+    grid-template-columns: 1fr;
+  }
+}

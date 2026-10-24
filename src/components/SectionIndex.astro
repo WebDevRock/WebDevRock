@@ -1,0 +1,112 @@
+---
+// A section's listing page: its glyph, title and introduction, then its pages as cards (in groups when given).
+// Pages come from the content index (front matter only), so a listing never loads the pages themselves.
+import BaseLayout from '../layouts/BaseLayout.astro';
+import Card from './Card.astro';
+import { getContentPages, getSection, sqlVersionLabel, type ContentPage } from '../lib/content';
+
+interface Props {
+  section: string;
+  title: string;
+  description: string; // meta description
+  intro: string;
+  groups?: { heading: string; pages: ContentPage[] }[]; // default: every page in the section, by title
+}
+
+const { section: key, title, description, intro } = Astro.props;
+const section = getSection(key);
+const pages = getContentPages()
+  .filter((p) => p.section === key)
+  .sort((a, b) => a.frontmatter.title.localeCompare(b.frontmatter.title));
+const groups = Astro.props.groups ?? [{ heading: '', pages }];
+---
+
+<BaseLayout title={title} description={description}>
+  <div class="section-page">
+    <header class="page-title">
+      <p class="kicker" style={`--type-fg: ${section.accent}; --type-bg: ${section.tint}`}>
+        <span class="glyph" aria-hidden="true">{section.glyph}</span>
+        <span class="micro-label">{pages.length} {pages.length === 1 ? 'page' : 'pages'}</span>
+      </p>
+      <h1>{title}</h1>
+      <p>{intro}</p>
+    </header>
+
+    <slot />
+
+    {groups.map((group) => (
+      <section class="group" aria-label={group.heading || title}>
+        {group.heading && <h2 class="group-title">{group.heading}</h2>}
+        <ul class="cards">
+          {group.pages.map((page) => (
+            <li data-sql-version={page.frontmatter.sqlVersion ?? ''}>
+              <Card
+                title={page.frontmatter.title}
+                href={page.path}
+                description={page.frontmatter.description}
+                tags={page.frontmatter.tags}
+                label={page.frontmatter.sqlVersion ? sqlVersionLabel(page.frontmatter.sqlVersion) : undefined}
+              />
+            </li>
+          ))}
+        </ul>
+      </section>
+    ))}
+  </div>
+</BaseLayout>
+
+<style>
+  .section-page {
+    max-width: var(--content-max);
+  }
+
+  .kicker {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 10px;
+  }
+
+  .glyph {
+    display: grid;
+    place-items: center;
+    width: 32px;
+    height: 28px;
+    border-radius: var(--radius-sm);
+    background: var(--type-bg);
+    color: var(--type-fg);
+    font-family: var(--font-mono);
+    font-size: 13px;
+    font-weight: 600;
+  }
+
+  .group {
+    margin-top: 32px;
+  }
+
+  .group-title {
+    margin-bottom: 14px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid var(--border-default);
+    color: var(--text-strong);
+    font-size: 17px;
+    font-weight: 650;
+  }
+
+  .cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+    gap: 14px;
+    list-style: none;
+  }
+
+  .cards li[hidden] {
+    display: none;
+  }
+
+  @media (max-width: 640px) {
+    .cards {
+      grid-template-columns: 1fr;
+    }
+  }
+</style>

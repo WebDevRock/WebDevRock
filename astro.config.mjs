@@ -7,7 +7,8 @@ export default defineConfig({
   integrations: [mdx(), sitemap()],
   markdown: {
     shikiConfig: {
-      theme: 'one-dark-pro',
+      // Colours come from the --syn-* tokens via src/styles/content.css
+      theme: 'css-variables',
       wrap: true
     }
   }

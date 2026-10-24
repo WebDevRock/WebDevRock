@@ -29,11 +29,11 @@ A more effective approach is to model processing as a sequence of stages rather 
 
 <div class="comparison">
   <div class="comparison-item bad">
-    <div class="comparison-label">❌ Single Status</div>
+    <div class="comparison-label">Single status</div>
     <pre><code>Status = Processing</code></pre>
   </div>
   <div class="comparison-item good">
-    <div class="comparison-label">✓ Staged Model</div>
+    <div class="comparison-label">Staged model</div>
     <ol class="stage-list">
       <li>Export detected</li>
       <li>Retrieved</li>
@@ -115,118 +115,3 @@ Separating processing into stages mirrors how systems actually work and reduces 
 Clear system state reduces support effort more effectively than additional logging or documentation.
 
 The same principle applies to history as well as current state. See [Designing Audit Trails That Help Investigation](/patterns/audit-trails-for-investigation).
-
-<style is:global>{`
-  .jargon {
-    position: relative;
-    text-decoration: underline;
-    text-decoration-style: dotted;
-    text-decoration-color: var(--accent, #0ea5e9);
-    text-decoration-thickness: 2px;
-    text-underline-offset: 3px;
-    cursor: help;
-  }
-
-  .jargon::after {
-    content: attr(data-tooltip);
-    position: absolute;
-    bottom: 100%;
-    left: 50%;
-    transform: translateX(-50%) translateY(-8px);
-    padding: 0.625rem 0.875rem;
-    background: var(--surface-elevated, #2a2a2a);
-    color: var(--text-primary, #fff);
-    border: 1px solid var(--border, #444);
-    border-radius: 0.375rem;
-    font-size: 0.875rem;
-    line-height: 1.5;
-    white-space: normal;
-    max-width: 400px;
-    min-width: 200px;
-    width: max-content;
-    opacity: 0;
-    pointer-events: none;
-    transition: opacity 0.2s ease;
-    z-index: 1000;
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
-  }
-
-  .jargon:hover::after {
-    opacity: 1;
-  }
-
-  @media (max-width: 768px) {
-    .jargon::after {
-      left: 0;
-      transform: translateX(0) translateY(-8px);
-      max-width: 280px;
-      min-width: 180px;
-    }
-  }
-
-  .stage-list {
-    list-style: none;
-    padding-left: 0;
-    counter-reset: stage-counter;
-  }
-
-  .stage-list li {
-    counter-increment: stage-counter;
-    padding-left: 2.5rem;
-    position: relative;
-    margin-bottom: 0.5rem;
-  }
-
-  .stage-list li::before {
-    content: counter(stage-counter);
-    position: absolute;
-    left: 0;
-    width: 1.75rem;
-    height: 1.75rem;
-    background: var(--accent, #0ea5e9);
-    color: var(--background, #000);
-    border-radius: 50%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-weight: 600;
-    font-size: 0.875rem;
-  }
-
-  .comparison {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 1.5rem;
-    margin: 1.5rem 0;
-  }
-
-  .comparison-item {
-    padding: 1rem;
-    background: var(--surface, #1a1a1a);
-    border: 1px solid var(--border, #333);
-    border-radius: 0.5rem;
-  }
-
-  .comparison-label {
-    font-weight: 600;
-    font-size: 0.875rem;
-    color: var(--text-secondary);
-    margin-bottom: 0.75rem;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-  }
-
-  .bad {
-    border-left: 3px solid #ef4444;
-  }
-
-  .good {
-    border-left: 3px solid #22c55e;
-  }
-
-  @media (max-width: 768px) {
-    .comparison {
-      grid-template-columns: 1fr;
-    }
-  }
-`}</style>

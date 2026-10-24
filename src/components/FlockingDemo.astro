@@ -248,10 +248,10 @@
   .canvas-wrapper {
     width: 100%;
     height: 500px;
-    background: #000;
+    background: var(--surface-inverse);
     border-radius: 0.5rem;
     margin: 2rem 0;
-    border: 1px solid var(--border);
+    border: 1px solid var(--border-default);
     position: relative;
   }
 
@@ -271,9 +271,9 @@
   }
 
   button {
-    background: var(--surface);
-    color: var(--text-primary);
-    border: 1px solid var(--border);
+    background: var(--surface-card);
+    color: var(--text-strong);
+    border: 1px solid var(--border-default);
     padding: 0.5rem 1rem;
     border-radius: 0.25rem;
     font-family: var(--font-mono);
@@ -283,12 +283,12 @@
   }
 
   button:hover {
-    background: var(--bg);
+    background: var(--surface-raised);
     border-color: var(--accent);
   }
 
   #boid-count {
-    color: var(--text-tertiary);
+    color: var(--text-muted);
     font-family: var(--font-mono);
     font-size: 0.875rem;
   }

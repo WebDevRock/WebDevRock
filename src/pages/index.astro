@@ -1,25 +1,18 @@
 ---
+// Homepage (design concept D, "Workbench"): a command palette for the common tasks that filters every page as
+// you type, then the learning paths, recent updates and tools. Sections are in the sidebar.
 import BaseLayout from '../layouts/BaseLayout.astro';
-import PageList from '../components/PageList.astro';
 import TypeLabel from '../components/TypeLabel.astro';
-import { LEARNING_PATHS, SECTIONS, byUpdated, formatDate, getContentPages } from '../lib/content';
+import { HOME_TASKS, LEARNING_PATHS, SECTIONS, byUpdated, formatDate, getContentPages, getSection } from '../lib/content';
 
 const pages = getContentPages();
 const byPath = new Map(pages.map((p) => [p.path, p]));
-const countFor = (key: string) => pages.filter((p) => p.section === key).length;
 
 const recent = pages.filter((p) => p.frontmatter.updated).sort(byUpdated).slice(0, 6);
 const lastUpdated = recent[0]?.frontmatter.updated;
 
-// "What are you trying to do?" entry points
-const tasks = [
-  { label: 'Fix data in production without risking it', path: '/patterns/sql-reversible-data-fix/' },
-  { label: 'Update or delete millions of rows', path: '/snippets/sql-batch-update-delete/' },
-  { label: 'Turn a spreadsheet list into SQL', path: '/tools/list-to-sql/' },
-  { label: 'Read a JSON payload in SQL Server', path: '/tools/json-to-openjson/' },
-  { label: 'Stop an integration creating duplicates', path: '/patterns/integration-jobs-safe-to-rerun/' },
-  { label: 'Retry a flaky API without hammering it', path: '/patterns/handling-unreliable-external-apis/' },
-].filter((t) => byPath.has(t.path));
+const tasks = HOME_TASKS.filter((t) => byPath.has(t.path));
+const taskPaths = new Set(tasks.map((t) => t.path));
 
 const paths = LEARNING_PATHS.map((p) => ({
   ...p,
@@ -27,6 +20,10 @@ const paths = LEARNING_PATHS.map((p) => ({
 }));
 
 const tools = pages.filter((p) => p.section === 'tools');
+
+// What the palette matches against: title, description and tags
+const searchText = (p: (typeof pages)[number], extra = '') =>
+  [extra, p.frontmatter.title, p.frontmatter.description, ...(p.frontmatter.tags ?? [])].join(' ').toLowerCase();
 ---
 
 <BaseLayout
@@ -34,568 +31,506 @@ const tools = pages.filter((p) => p.section === 'tools');
   description="A working knowledge base of SQL Server scripts, integration patterns, browser tools, and experiments, shaped by real constraints: messy data, limited schema control, and the need to be reliable."
 >
   <div class="home">
-    <!-- Hero: what the site is, plus task-based ways in -->
-    <section class="hero">
-      <div class="hero-intro">
-        <p class="hero-badge">
-          {pages.length} guides, snippets and tools{lastUpdated && <> · updated {formatDate(lastUpdated)}</>}
-        </p>
-        <h1>Practical patterns for <em>real-world</em> development</h1>
-        <p class="hero-description">
-          Most development happens inside existing systems. Scripts, patterns and tools shaped by real constraints:
-          messy data, limited schema control, and the need to be reliable.
-        </p>
-        <div class="hero-actions">
-          <a class="button primary" href="/patterns/" data-umami-event="home-click" data-umami-event-target="hero-patterns">
-            Explore the patterns
-          </a>
-          <a class="button" href="/tools/" data-umami-event="home-click" data-umami-event-target="hero-tools">
-            Open the tools
-          </a>
-        </div>
-      </div>
+    <header class="intro">
+      <p class="micro-label">
+        {pages.length} guides, snippets and tools{lastUpdated && <> · updated {formatDate(lastUpdated)}</>}
+      </p>
+      <h1>Practical patterns for <em>real-world</em> development</h1>
+      <p class="lead">
+        Most development happens inside existing systems. Scripts, patterns and tools shaped by real constraints:
+        messy data, limited schema control, and the need to be reliable.
+      </p>
+    </header>
 
-      <section class="task-panel" aria-labelledby="task-heading">
-        <h2 id="task-heading" class="panel-title"><span aria-hidden="true">$</span> What are you trying to do?</h2>
-        <ul>
-          {tasks.map((task) => {
-            const page = byPath.get(task.path)!;
-            return (
-              <li>
-                <a href={task.path} data-umami-event="home-click" data-umami-event-target={`task-${page.slug}`}>
-                  <span class="task-label">{task.label}</span>
-                  <TypeLabel section={page.section} />
-                </a>
-              </li>
-            );
-          })}
-        </ul>
-      </section>
-    </section>
-
-    <!-- Sections -->
-    <section class="block" aria-labelledby="sections-heading">
-      <div class="block-header">
-        <h2 id="sections-heading" class="block-title">Browse by section</h2>
-        <a class="block-link" href="/tags/" data-umami-event="home-click" data-umami-event-target="all-tags">Browse by tag →</a>
-      </div>
-      <div class="section-grid">
-        {SECTIONS.map((section) => (
-          <a
-            class="section-tile"
-            href={`/${section.key}/`}
-            style={`--accent: ${section.accent}`}
-            data-umami-event="home-click"
-            data-umami-event-target={`section-${section.key}`}
-          >
-            <span class="tile-glyph" aria-hidden="true">{section.glyph}</span>
-            <span class="tile-name">{section.name}</span>
-            <span class="tile-count">{countFor(section.key)} {countFor(section.key) === 1 ? 'page' : 'pages'}</span>
-            <span class="tile-description">{section.description}</span>
-          </a>
+    <!-- Command palette: the task shortcuts until you type, then every page that matches -->
+    <section class="palette" aria-labelledby="palette-title" data-pagefind-ignore>
+      <label class="palette-input">
+        <span class="prompt" aria-hidden="true">$</span>
+        <span id="palette-title" class="visually-hidden">What are you trying to do?</span>
+        <input type="text" placeholder="What are you trying to do?" autocomplete="off" spellcheck="false" data-palette-input />
+        <kbd class="enter-hint">↵ open</kbd>
+      </label>
+      <ul class="palette-list" data-palette-list>
+        {tasks.map((t) => {
+          const page = byPath.get(t.path)!;
+          return (
+            <li data-task data-search={searchText(page, t.label)}>
+              <a href={t.path} data-umami-event="home-click" data-umami-event-target={`task-${page.slug}`}>
+                <span class="row-icon" aria-hidden="true">↳</span>
+                <span class="item-title">{t.label}</span>
+                <TypeLabel section={page.section} />
+              </a>
+            </li>
+          );
+        })}
+        {pages.filter((p) => !taskPaths.has(p.path)).map((p) => (
+          <li data-page hidden data-search={searchText(p)}>
+            <a href={p.path} data-umami-event="home-click" data-umami-event-target={`palette-${p.slug}`}>
+              <span class="glyph" style={`--type-fg: ${getSection(p.section).accent}; --type-bg: ${getSection(p.section).tint}`} aria-hidden="true">{getSection(p.section).glyph}</span>
+              <span class="item-title">{p.frontmatter.title}</span>
+              <TypeLabel section={p.section} />
+            </a>
+          </li>
         ))}
-      </div>
+      </ul>
+      <p class="palette-empty" data-palette-empty hidden>
+        Nothing here matches. <a href="/search/" data-palette-search>Search the whole site</a>
+      </p>
     </section>
 
-    <!-- Learning paths -->
-    <section class="block" id="start-here" aria-labelledby="paths-heading">
-      <div class="block-header">
-        <h2 id="paths-heading" class="block-title">Start here</h2>
-        <p class="block-note">Read in order: each step builds on the one before.</p>
-      </div>
-      <div class="path-grid">
-        {paths.map((path) => (
-          <article class="path-card">
-            <h3>{path.title}</h3>
-            <p>{path.summary}</p>
-            <ol class="path-steps">
-              {path.steps.map((step) => (
+    <div class="columns">
+      <section aria-labelledby="paths-title">
+        <h2 id="paths-title" class="col-title">Start here</h2>
+        <p class="col-note">Read in order: each step builds on the one before.</p>
+        {paths.map((p, i) => (
+          <div class="path" id={i === 0 ? 'start-here' : undefined}>
+            <h3 class="micro-label">{p.title}</h3>
+            <ol>
+              {p.steps.map((s) => (
                 <li>
-                  <a href={step.path} data-umami-event="home-click" data-umami-event-target={`path-${step.slug}`}>
-                    <span class="step-title">{step.frontmatter.title}</span>
-                    <TypeLabel section={step.section} />
+                  <a href={s.path} data-umami-event="home-click" data-umami-event-target={`path-${s.slug}`}>
+                    <span class="item-title">{s.frontmatter.title}</span>
+                    <TypeLabel section={s.section} />
                   </a>
                 </li>
               ))}
             </ol>
-          </article>
+          </div>
         ))}
-      </div>
-    </section>
+      </section>
 
-    <!-- Tools -->
-    <section class="block" aria-labelledby="tools-heading">
-      <div class="block-header">
-        <h2 id="tools-heading" class="block-title">Tools</h2>
-        <a class="block-link" href="/tools/">All tools →</a>
-      </div>
-      <p class="block-intro">Run entirely in your browser. Nothing you paste is sent anywhere.</p>
-      <div class="tool-grid">
-        {tools.map((tool) => (
-          <a class="tool-tile" href={tool.path} data-umami-event="home-click" data-umami-event-target={`tool-${tool.slug}`}>
-            <span class="tool-command"><span aria-hidden="true">&gt;_ </span>{tool.slug}</span>
-            <span class="tool-title">{tool.frontmatter.title}</span>
-            <span class="tool-description">{tool.frontmatter.description}</span>
-          </a>
+      <section aria-labelledby="recent-title">
+        <h2 id="recent-title" class="col-title">Recently updated</h2>
+        <div class="table-wrap">
+          <table class="recent">
+            <thead>
+              <tr><th scope="col">Page</th><th scope="col">Type</th><th scope="col">Updated</th></tr>
+            </thead>
+            <tbody>
+              {recent.map((p) => (
+                <tr>
+                  <td><a href={p.path} data-umami-event="page-list-click" data-umami-event-target={`recent-${p.slug}`}>{p.frontmatter.title}</a></td>
+                  <td><TypeLabel section={p.section} /></td>
+                  <td class="date">{p.frontmatter.updated && formatDate(p.frontmatter.updated)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        <h2 class="col-title tools-title">Tools <span class="note">run in your browser; nothing you paste is sent anywhere</span></h2>
+        <ul class="tools">
+          {tools.map((t) => (
+            <li>
+              <a href={t.path} data-umami-event="home-click" data-umami-event-target={`tool-${t.slug}`}>
+                <span class="slug">&gt;_ {t.slug}</span>
+                <span class="tool-desc">{t.frontmatter.description}</span>
+              </a>
+            </li>
+          ))}
+        </ul>
+      </section>
+    </div>
+
+    <section class="sections" aria-labelledby="sections-title">
+      <h2 id="sections-title" class="col-title">Browse by section</h2>
+      <ul>
+        {SECTIONS.map((s) => (
+          <li>
+            <a href={`/${s.key}/`} style={`--type-fg: ${s.accent}; --type-bg: ${s.tint}`} data-umami-event="home-click" data-umami-event-target={`section-${s.key}`}>
+              <span class="glyph" aria-hidden="true">{s.glyph}</span>
+              <span class="section-name">{s.name}</span>
+              <span class="section-desc">{s.description}</span>
+            </a>
+          </li>
         ))}
-      </div>
-    </section>
-
-    <!-- Recently updated -->
-    <section class="block" aria-labelledby="recent-heading">
-      <div class="block-header">
-        <h2 id="recent-heading" class="block-title">Recently updated</h2>
-      </div>
-      <PageList pages={recent} track="recent" />
-    </section>
-
-    <!-- About -->
-    <section class="about">
-      <p>
-        Written from day-to-day work on operational systems: SQL Server, integrations, and the tools around them.
-        Every page is also available as Markdown for AI tools; see <a href="/llms.txt">llms.txt</a>.
-      </p>
+      </ul>
     </section>
   </div>
 </BaseLayout>
 
+<script>
+  const input = document.querySelector<HTMLInputElement>('[data-palette-input]');
+  const list = document.querySelector<HTMLElement>('[data-palette-list]');
+  const empty = document.querySelector<HTMLElement>('[data-palette-empty]');
+  const searchLink = document.querySelector<HTMLAnchorElement>('[data-palette-search]');
+
+  if (input && list && empty && searchLink) {
+    const items = [...list.querySelectorAll<HTMLLIElement>('li')];
+
+    input.addEventListener('input', () => {
+      const query = input.value.trim();
+      const words = query.toLowerCase().split(/\s+/).filter(Boolean);
+      let shown = 0;
+      for (const item of items) {
+        const match = words.length
+          ? words.every((w) => item.dataset.search!.includes(w)) && shown < 8
+          : item.hasAttribute('data-task');
+        item.hidden = !match;
+        if (match) shown++;
+      }
+      empty.hidden = shown > 0;
+      searchLink.href = query ? `/search/?q=${encodeURIComponent(query)}` : '/search/';
+      searchLink.textContent = query ? `Search the whole site for “${query}”` : 'Search the whole site';
+    });
+
+    // Enter opens the first match, or the full search when nothing matches
+    input.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter') return;
+      const first = items.find((i) => !i.hidden)?.querySelector('a');
+      location.href = first ? first.href : searchLink.href;
+    });
+  }
+</script>
+
 <style>
   .home {
-    max-width: 1100px;
-    margin: 0 auto;
-    overflow-x: clip; /* the hero glows extend past the edges; don't let them cause sideways scrolling */
+    max-width: var(--content-max);
   }
 
-  /* Hero */
-  .hero {
-    position: relative;
-    display: grid;
-    grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr);
-    gap: 3rem;
-    align-items: center;
-    padding: 4rem 0 5rem;
+  .intro h1 {
+    max-width: 22ch;
+    margin-top: 8px;
+    color: var(--text-strong);
+    font-size: var(--fs-h1);
+    line-height: var(--lh-h1);
+    letter-spacing: var(--ls-h1);
+    font-weight: 700;
   }
 
-  .hero::before {
-    content: '';
-    position: absolute;
-    top: 0;
-    right: -10%;
-    width: 520px;
-    height: 520px;
-    background: radial-gradient(circle, rgba(255, 107, 107, 0.08) 0%, transparent 70%);
-    pointer-events: none;
-  }
-
-  .hero::after {
-    content: '';
-    position: absolute;
-    bottom: 0;
-    left: -12%;
-    width: 420px;
-    height: 420px;
-    background: radial-gradient(circle, rgba(34, 211, 238, 0.06) 0%, transparent 70%);
-    pointer-events: none;
-  }
-
-  .hero-intro,
-  .task-panel {
-    position: relative;
-    z-index: 1;
-  }
-
-  .hero-badge {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.5rem;
-    padding: 0.4rem 0.8rem;
-    background: var(--bg-surface);
-    border: 1px solid var(--border);
-    border-radius: 100px;
-    font-size: 0.8rem;
-    color: var(--text-secondary);
-    margin-bottom: 1.75rem;
-  }
-
-  .hero-badge::before {
-    content: '';
-    width: 6px;
-    height: 6px;
-    background: var(--accent-lime);
-    border-radius: 50%;
-  }
-
-  .hero h1 {
-    font-family: var(--font-serif);
-    font-size: clamp(2.5rem, 6vw, 4.25rem);
-    font-weight: 400;
-    line-height: 1.08;
-    letter-spacing: -0.03em;
-    margin-bottom: 1.5rem;
-  }
-
-  .hero h1 em {
-    font-style: italic;
-    background: var(--gradient-1);
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    background-clip: text;
-  }
-
-  .hero-description {
-    font-size: 1.15rem;
-    color: var(--text-secondary);
-    line-height: 1.7;
-    max-width: 560px;
-    margin-bottom: 2rem;
-  }
-
-  .hero-actions {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.75rem;
-  }
-
-  .button {
-    display: inline-flex;
-    align-items: center;
-    padding: 0.75rem 1.25rem;
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    background: var(--bg-surface);
-    color: var(--text-primary);
+  .intro em {
+    color: var(--accent);
+    font-family: var(--font-serif-italic);
     font-weight: 500;
-    text-decoration: none;
-    transition: border-color 0.2s ease, transform 0.2s ease;
+    letter-spacing: -0.01em;
   }
 
-  .button:hover {
-    border-color: var(--accent-cyan);
-    transform: translateY(-1px);
+  .lead {
+    max-width: 60ch;
+    margin-top: 10px;
+    color: var(--text-muted);
+    font-size: 17px;
   }
 
-  .button.primary {
-    background: var(--gradient-1);
-    border-color: transparent;
-    color: var(--bg-deep);
-    font-weight: 600;
+  /* Palette */
+  .palette {
+    margin-top: 32px;
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-lg);
+    background: var(--surface-raised);
+    box-shadow: var(--shadow-card);
+    overflow: hidden;
   }
 
-  /* Task panel */
-  .task-panel {
-    background: var(--bg-surface);
-    border: 1px solid var(--border);
-    border-radius: 16px;
-    padding: 1.5rem;
-    box-shadow: 0 24px 60px rgba(0, 0, 0, 0.35);
-  }
-
-  .panel-title {
-    font-family: var(--font-mono);
-    font-size: 0.85rem;
-    font-weight: 500;
-    color: var(--text-secondary);
-    margin-bottom: 1rem;
-  }
-
-  .panel-title span {
-    color: var(--accent-lime);
-  }
-
-  .task-panel ul {
-    list-style: none;
-    display: grid;
-    gap: 0.375rem;
-  }
-
-  .task-panel a {
+  .palette-input {
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    gap: 1rem;
-    padding: 0.75rem 0.875rem;
-    border-radius: 10px;
-    color: var(--text-primary);
-    text-decoration: none;
-    transition: background 0.2s ease;
-  }
-
-  .task-panel a:hover {
-    background: var(--bg-hover);
-  }
-
-  .task-label {
-    font-size: 0.95rem;
-  }
-
-  /* Blocks */
-  .block {
-    padding: 3.5rem 0;
-  }
-
-  .block-header {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: baseline;
-    justify-content: space-between;
-    gap: 0.5rem 1rem;
-    margin-bottom: 1.75rem;
-    padding-bottom: 1rem;
+    gap: 12px;
+    padding: 0 16px;
     border-bottom: 1px solid var(--border-subtle);
   }
 
-  .block-title {
-    font-size: 0.8rem;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.15em;
-    color: var(--text-muted);
+  .palette-input:focus-within {
+    box-shadow: inset 0 -2px 0 var(--accent);
   }
 
-  .block-note,
-  .block-intro {
-    color: var(--text-muted);
-    font-size: 0.9rem;
-  }
-
-  .block-intro {
-    margin: -0.75rem 0 1.5rem;
-  }
-
-  .block-link {
-    color: var(--accent-coral);
-    font-size: 0.9rem;
-    text-decoration: none;
-  }
-
-  .block-link:hover {
-    text-decoration: underline;
-  }
-
-  /* Section tiles */
-  .section-grid {
-    display: grid;
-    grid-template-columns: repeat(5, minmax(0, 1fr));
-    gap: 1rem;
-  }
-
-  .section-tile {
-    display: flex;
-    flex-direction: column;
-    gap: 0.5rem;
-    padding: 1.25rem;
-    background: var(--bg-surface);
-    border: 1px solid var(--border-subtle);
-    border-top: 3px solid var(--accent);
-    border-radius: 14px;
-    color: var(--text-primary);
-    text-decoration: none;
-    transition: border-color 0.2s ease, transform 0.2s ease;
-  }
-
-  .section-tile:hover {
-    border-color: var(--accent);
-    transform: translateY(-2px);
-  }
-
-  .tile-glyph {
-    font-family: var(--font-mono);
-    font-weight: 600;
+  .prompt {
     color: var(--accent);
-  }
-
-  .tile-name {
-    font-size: 1.1rem;
+    font-family: var(--font-mono);
+    font-size: 18px;
     font-weight: 600;
   }
 
-  .tile-count {
-    font-family: var(--font-mono);
-    font-size: 0.8rem;
+  .palette-input input {
+    flex: 1;
+    min-width: 0;
+    padding: 18px 0;
+    border: 0;
+    outline: 0;
+    background: transparent;
+    color: var(--text-strong);
+    font: 500 19px var(--font-sans);
+  }
+
+  .palette-input input:focus-visible {
+    box-shadow: none;
+  }
+
+  .palette-input input::placeholder {
     color: var(--text-muted);
   }
 
-  .tile-description {
-    font-size: 0.875rem;
-    color: var(--text-secondary);
-    line-height: 1.5;
+  .enter-hint {
+    white-space: nowrap;
   }
 
-  /* Learning paths */
-  .path-grid {
+  .palette-list {
+    padding: 6px;
+    list-style: none;
+  }
+
+  .palette-list a {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-height: 44px;
+    padding: 8px 10px;
+    border-radius: var(--radius-md);
+    color: var(--text-strong);
+    font-weight: 500;
+    text-decoration: none;
+  }
+
+  .palette-list a:hover,
+  .palette-list a:focus-visible,
+  .palette-list li:first-child:not([hidden]) a {
+    background: var(--surface-card);
+    color: var(--text-strong);
+  }
+
+  .row-icon {
+    width: 26px;
+    color: var(--text-muted);
+    text-align: center;
+  }
+
+  .item-title {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .glyph {
     display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 1.5rem;
-  }
-
-  .path-card {
-    padding: 1.75rem;
-    background: var(--bg-surface);
-    border: 1px solid var(--border-subtle);
-    border-radius: 16px;
-  }
-
-  .path-card h3 {
-    font-family: var(--font-serif);
-    font-size: 1.6rem;
+    place-items: center;
+    flex: none;
+    width: 26px;
+    height: 22px;
+    border-radius: var(--radius-sm);
+    background: var(--type-bg);
+    color: var(--type-fg);
+    font-family: var(--font-mono);
+    font-size: 11.5px;
     font-weight: 600;
-    margin-bottom: 0.5rem;
   }
 
-  .path-card > p {
-    color: var(--text-secondary);
-    margin-bottom: 1.25rem;
+  .palette-empty {
+    padding: 14px 16px;
+    color: var(--text-muted);
+    font-size: var(--fs-small);
   }
 
-  .path-steps {
+  /* Columns */
+  .columns {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr);
+    gap: 40px;
+    margin-top: 48px;
+  }
+
+  .col-title {
+    padding-bottom: 10px;
+    border-bottom: 1px solid var(--border-default);
+    color: var(--text-strong);
+    font-size: 17px;
+    font-weight: 650;
+  }
+
+  .col-note,
+  .note {
+    color: var(--text-muted);
+    font-size: 13.5px;
+    font-weight: 400;
+  }
+
+  .col-note {
+    margin-top: 8px;
+  }
+
+  .note {
+    margin-left: 6px;
+  }
+
+  .path {
+    margin-top: 18px;
+    scroll-margin-top: 80px;
+  }
+
+  .path ol {
+    margin-top: 8px;
     list-style: none;
     counter-reset: step;
-    display: grid;
-    gap: 0.25rem;
   }
 
-  .path-steps li {
+  .path li {
     counter-increment: step;
   }
 
-  .path-steps a {
+  .path a {
     display: flex;
     align-items: center;
-    gap: 0.75rem;
-    padding: 0.6rem 0.5rem;
-    border-radius: 10px;
-    color: var(--text-primary);
+    gap: 10px;
+    padding: 7px 0;
+    color: var(--text-strong);
+    font-size: 15px;
     text-decoration: none;
-    transition: background 0.2s ease;
   }
 
-  .path-steps a::before {
+  .path a::before {
     content: counter(step);
-    flex-shrink: 0;
-    width: 1.75rem;
-    height: 1.75rem;
-    display: grid;
-    place-items: center;
-    border-radius: 50%;
-    background: var(--bg-elevated);
-    border: 1px solid var(--border);
+    flex: none;
+    width: 20px;
+    color: var(--text-muted);
     font-family: var(--font-mono);
-    font-size: 0.8rem;
-    color: var(--text-secondary);
+    font-size: 12px;
   }
 
-  .path-steps a:hover {
-    background: var(--bg-hover);
+  .path a:hover .item-title {
+    color: var(--text-link-hover);
+    text-decoration: underline;
+    text-underline-offset: 3px;
   }
 
-  .step-title {
-    flex: 1;
-    font-size: 0.95rem;
+  .table-wrap {
+    overflow-x: auto;
   }
 
-  /* Tools */
-  .tool-grid {
+  .recent {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 14.5px;
+  }
+
+  .recent th {
+    padding: 10px 8px 6px 0;
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    font-weight: 500;
+    letter-spacing: 0.06em;
+    text-align: left;
+    text-transform: uppercase;
+  }
+
+  .recent td {
+    padding: 9px 8px 9px 0;
+    border-top: 1px solid var(--border-subtle);
+    vertical-align: top;
+  }
+
+  .recent td a {
+    color: var(--text-strong);
+    font-weight: 500;
+    text-decoration: none;
+  }
+
+  .recent td a:hover {
+    color: var(--text-link-hover);
+    text-decoration: underline;
+  }
+
+  .date {
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+    white-space: nowrap;
+  }
+
+  .tools-title {
+    margin-top: 36px;
+  }
+
+  .tools {
+    list-style: none;
+  }
+
+  .tools a {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-    gap: 1rem;
+    grid-template-columns: 190px minmax(0, 1fr);
+    gap: 12px;
+    padding: 9px 0;
+    border-bottom: 1px solid var(--border-subtle);
+    color: var(--text-muted);
+    font-size: 14px;
+    text-decoration: none;
   }
 
-  .tool-tile {
+  .tools a:hover .slug {
+    text-decoration: underline;
+    text-underline-offset: 3px;
+  }
+
+  .slug {
+    color: var(--type-tools-fg);
+    font-family: var(--font-mono);
+    font-size: 13px;
+  }
+
+  /* Sections, for readers who land here first */
+  .sections {
+    margin-top: 48px;
+  }
+
+  .sections ul {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+    gap: 12px;
+    margin-top: 16px;
+    list-style: none;
+  }
+
+  .sections a {
     display: flex;
     flex-direction: column;
-    gap: 0.4rem;
-    padding: 1.25rem;
-    background: var(--bg-surface);
+    gap: 6px;
+    height: 100%;
+    padding: 16px;
     border: 1px solid var(--border-subtle);
-    border-radius: 14px;
-    color: var(--text-primary);
+    border-radius: var(--radius-lg);
+    background: var(--surface-card);
+    color: var(--text-body);
     text-decoration: none;
-    transition: border-color 0.2s ease;
+    transition: background var(--dur-base) var(--ease-out), box-shadow var(--dur-base) var(--ease-out);
   }
 
-  .tool-tile:hover {
-    border-color: var(--accent-cyan);
+  .sections a:hover {
+    background: var(--surface-raised);
+    box-shadow: var(--shadow-hover);
+    color: var(--text-body);
   }
 
-  .tool-command {
-    font-family: var(--font-mono);
-    font-size: 0.8rem;
-    color: var(--accent-cyan);
+  .section-name {
+    color: var(--text-strong);
+    font-weight: 650;
   }
 
-  .tool-title {
-    font-weight: 600;
-  }
-
-  .tool-description {
-    font-size: 0.875rem;
-    color: var(--text-secondary);
-    line-height: 1.5;
-  }
-
-  /* About */
-  .about {
-    padding: 2rem 0 1rem;
+  .section-desc {
     color: var(--text-muted);
-    font-size: 0.9rem;
-    max-width: 680px;
+    font-size: 13.5px;
+    line-height: 1.45;
   }
 
-  .about a {
-    color: var(--link);
-  }
-
-  /* Focus */
-  .home a:focus-visible {
-    outline: 2px solid var(--accent-cyan);
-    outline-offset: 2px;
-  }
-
-  /* Responsive */
-  @media (max-width: 1000px) {
-    .hero {
-      grid-template-columns: 1fr;
-      gap: 2.5rem;
-      padding: 2.5rem 0 3.5rem;
+  @media (max-width: 960px) {
+    .intro h1 {
+      font-size: 32px;
     }
 
-    .section-grid {
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-    }
-
-    .path-grid {
+    .columns {
       grid-template-columns: 1fr;
     }
-  }
 
-  @media (max-width: 600px) {
-    .hero h1 {
-      font-size: 2.25rem;
+    .enter-hint,
+    .palette-list :global(.type-label) {
+      display: none;
     }
 
-    .hero-description {
-      font-size: 1.05rem;
-    }
-
-    .hero-actions .button {
-      flex: 1;
-      justify-content: center;
-    }
-
-    .section-grid {
+    .tools a {
       grid-template-columns: 1fr;
-    }
-  }
-
-  @media (prefers-reduced-motion: reduce) {
-    .button,
-    .section-tile {
-      transition: none;
+      gap: 2px;
     }
 
-    .button:hover,
-    .section-tile:hover {
-      transform: none;
+    .recent th:nth-child(2),
+    .recent td:nth-child(2) {
+      display: none;
     }
   }
 </style>

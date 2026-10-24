@@ -98,7 +98,7 @@ const reasons = [
   .feedback {
     margin-top: 3rem;
     padding: 1.25rem 1.5rem;
-    background: var(--bg-surface);
+    background: var(--surface-card);
     border: 1px solid var(--border-subtle);
     border-radius: 12px;
   }
@@ -127,10 +127,10 @@ const reasons = [
 
   button {
     padding: 0.45rem 0.9rem;
-    background: var(--bg-elevated);
-    border: 1px solid var(--border);
+    background: var(--surface-raised);
+    border: 1px solid var(--border-default);
     border-radius: 8px;
-    color: var(--text-secondary);
+    color: var(--text-body);
     font: inherit;
     font-size: 0.875rem;
     cursor: pointer;
@@ -143,21 +143,21 @@ const reasons = [
 
   button:hover,
   button:focus-visible {
-    color: var(--text-primary);
-    border-color: var(--accent-cyan);
+    color: var(--text-strong);
+    border-color: var(--accent);
   }
 
   [data-answer='yes']:hover,
   [data-answer='yes']:focus-visible {
-    border-color: var(--accent-lime);
+    border-color: var(--success-fg);
   }
 
   [data-answer='no']:hover,
   [data-answer='no']:focus-visible {
-    border-color: var(--accent-coral);
+    border-color: var(--danger-fg);
   }
 
   .thanks {
-    color: var(--text-secondary);
+    color: var(--text-body);
   }
 </style>

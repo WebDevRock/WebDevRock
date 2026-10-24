@@ -6,8 +6,10 @@ import PageEndNav from '../components/PageEndNav.astro';
 import PageFeedback from '../components/PageFeedback.astro';
 import PlaceholderPanel from '../components/PlaceholderPanel.astro';
 import TableOfContents from '../components/TableOfContents.astro';
-import { SECTIONS, normalisePath, readingMinutes, sqlVersionLabel, sqlVersionsFrom, tagPath, type Frontmatter } from '../lib/content';
+import TypeLabel from '../components/TypeLabel.astro';
+import { SECTIONS, formatDate, normalisePath, readingMinutes, sqlVersionLabel, sqlVersionsFrom, tagPath, type Frontmatter } from '../lib/content';
 import type { Placeholder } from '../scripts/placeholders';
+import '../styles/content.css';
 
 interface Props {
   // MDX parses the full YAML, so lists like placeholders are available here (content.ts only reads the simple fields)
@@ -34,32 +36,54 @@ const hasChecks = (Astro.props.headings ?? []).some((h) => h.depth === 2 && h.sl
 
 <BaseLayout title={title} description={description} type="article" updated={updated}>
   <article class:list={['content-page', { 'has-toc': showToc }]} data-pagefind-body data-pagefind-filter={section ? `section:${section.name}` : undefined}>
-    <div class="page-header">
+    <header class="page-header">
+      {section && <TypeLabel section={section.key} glyph />}
       <h1>{title}</h1>
       {description && <p class="description">{description}</p>}
-      <div class="meta">
-        {tags && tags.length > 0 && (
-          <div class="tags">
-            {tags.map((tag) => (
-              <a class="tag" href={tagPath(tag)} data-umami-event="tag-click" data-umami-event-target={`page-${tag}`}>{tag}</a>
-            ))}
+
+      <dl class="facts">
+        {updated && (
+          <div>
+            <dt>Updated</dt>
+            <dd><time datetime={updated}>{formatDate(updated)}</time></dd>
+          </div>
+        )}
+        {minutes && (
+          <div>
+            <dt>Reading time</dt>
+            <dd>{minutes} min</dd>
           </div>
         )}
         {sqlVersion && (
-          <span class="sql-version" title={`Runs on SQL Server ${sqlVersion} and later, Azure SQL Database and Azure SQL Managed Instance`}>
-            {sqlVersionLabel(sqlVersion)}
-          </span>
+          <div>
+            <dt>Requires</dt>
+            <dd title={`Runs on SQL Server ${sqlVersion} and later, Azure SQL Database and Azure SQL Managed Instance`}>{sqlVersionLabel(sqlVersion)}</dd>
+          </div>
         )}
-        {updated && <span class="updated">Updated: {updated}</span>}
-        {minutes && <span class="reading-time">{minutes} min read</span>}
-        {section && <CopyMarkdown path={path} />}
-      </div>
+        {tags && tags.length > 0 && (
+          <div class="tags">
+            <dt>Tags</dt>
+            <dd>
+              {tags.map((tag) => (
+                <a class="tag" href={tagPath(tag)} data-umami-event="tag-click" data-umami-event-target={`page-${tag}`}>{tag}</a>
+              ))}
+            </dd>
+          </div>
+        )}
+        {section && (
+          <div class="markdown">
+            <dt>Markdown</dt>
+            <dd><CopyMarkdown path={path} /></dd>
+          </div>
+        )}
+      </dl>
       {sqlNote && <p class="sql-note"><strong>Requires:</strong> {sqlNote}</p>}
       {/* Search filter: one value per release the snippet runs on, so choosing "2014" finds everything that works there */}
       {sqlVersion && sqlVersionsFrom(sqlVersion).map((v) => (
         <span hidden data-pagefind-filter="Runs on SQL Server[data-version]" data-version={v}></span>
       ))}
-    </div>
+    </header>
+
     <div class="page-body">
       {showToc && <TableOfContents headings={headings} />}
       <div class="content">
@@ -76,285 +100,170 @@ const hasChecks = (Astro.props.headings ?? []).some((h) => h.depth === 2 && h.sl
 <script>
   import { trackEvent } from '../scripts/analytics';
 
-  // Add copy buttons to all code blocks
-  function addCopyButtons() {
-    const codeBlocks = document.querySelectorAll<HTMLElement>('.content pre');
+  // Each highlighted code block gets a caption bar with its language and a Copy button
+  function addCodeBars() {
+    document.querySelectorAll<HTMLPreElement>('.content pre.astro-code').forEach((pre, index) => {
+      if (pre.parentElement?.classList.contains('code-block')) return;
 
-    codeBlocks.forEach((pre, index) => {
-      // Skip if already wrapped
-      if (pre.parentElement?.classList.contains('code-block-wrapper')) {
-        return;
-      }
-
-      // Create wrapper
       const wrapper = document.createElement('div');
-      wrapper.className = 'code-block-wrapper';
-      
-      // Create copy button
+      wrapper.className = 'code-block';
+
+      const bar = document.createElement('div');
+      bar.className = 'code-bar';
+
+      const language = document.createElement('span');
+      language.className = 'code-language';
+      language.textContent = pre.dataset.language && pre.dataset.language !== 'plaintext' ? pre.dataset.language : 'text';
+
       const button = document.createElement('button');
+      button.type = 'button';
       button.className = 'copy-button';
       button.textContent = 'Copy';
-      button.setAttribute('aria-label', 'Copy code to clipboard');
-      
-      // Add click handler
+      button.setAttribute('aria-label', `Copy ${language.textContent} code`);
+
       button.addEventListener('click', async () => {
-        const code = pre.textContent || '';
-        
         try {
-          await navigator.clipboard.writeText(code);
+          await navigator.clipboard.writeText(pre.textContent || '');
           trackEvent('code-copy', {
             page: location.pathname,
             section: location.pathname.split('/')[1] || 'home',
             language: pre.dataset.language || 'text',
             block: index + 1,
           });
-          button.textContent = 'Copied!';
+          button.textContent = 'Copied';
           button.classList.add('copied');
-          
-          setTimeout(() => {
-            button.textContent = 'Copy';
-            button.classList.remove('copied');
-          }, 2000);
         } catch (err) {
           console.error('Failed to copy code:', err);
-          button.textContent = 'Error';
-          
-          setTimeout(() => {
-            button.textContent = 'Copy';
-          }, 2000);
+          button.textContent = 'Copy failed';
         }
+        setTimeout(() => {
+          button.textContent = 'Copy';
+          button.classList.remove('copied');
+        }, 2000);
       });
-      
-      // Wrap the pre element
-      pre.parentNode?.insertBefore(wrapper, pre);
-      wrapper.appendChild(pre);
-      wrapper.appendChild(button);
+
+      bar.append(language, button);
+      pre.before(wrapper);
+      wrapper.append(bar, pre);
     });
   }
 
-  // Run on initial load
-  addCopyButtons();
-
-  // Re-run after view transitions (if using Astro view transitions)
-  document.addEventListener('astro:page-load', addCopyButtons);
+  addCodeBars();
 </script>
 
 <style>
   .content-page {
-    max-width: 800px;
-    margin: 0 auto;
+    max-width: calc(var(--prose-max) + 56px + 220px);
   }
 
   .page-header {
-    margin-bottom: 3rem;
+    max-width: var(--prose-max);
+    margin-bottom: 8px;
+    padding-bottom: 24px;
+    border-bottom: 1px solid var(--border-subtle);
   }
 
   .page-header h1 {
-    margin-bottom: 0.5rem;
-    font-size: 2.5rem;
-    font-weight: 600;
+    margin-top: 12px;
+    color: var(--text-strong);
+    font-size: 36px;
+    line-height: var(--lh-h1);
+    letter-spacing: var(--ls-h1);
+    font-weight: 700;
   }
 
   .description {
-    color: var(--text-secondary);
-    font-size: 1.125rem;
-    margin-bottom: 1rem;
+    margin-top: 10px;
+    color: var(--text-body);
+    font-size: 18px;
+    line-height: var(--lh-lead);
   }
 
-  .meta {
+  .facts {
     display: flex;
-    gap: 1rem;
-    align-items: center;
     flex-wrap: wrap;
-    font-size: 0.875rem;
+    gap: 10px 32px;
+    margin-top: 20px;
+    padding: 12px 16px;
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-md);
+    background: var(--surface-card);
   }
 
-  .tags {
+  .facts dt {
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+
+  .facts dd {
+    color: var(--text-strong);
+    font-size: 14px;
+    font-weight: 500;
+  }
+
+  .facts .tags dd {
     display: flex;
-    gap: 0.5rem;
     flex-wrap: wrap;
+    gap: 4px 10px;
   }
 
   .tag {
-    background: var(--bg-surface);
-    color: var(--text-muted);
-    padding: 0.25rem 0.625rem;
-    border: 1px solid transparent;
-    border-radius: 0.25rem;
     font-family: var(--font-mono);
-    text-decoration: none;
-    transition: border-color 0.2s ease, color 0.2s ease;
+    font-size: 13px;
+    font-weight: 400;
   }
 
-  .tag:hover,
-  .tag:focus-visible {
-    border-color: var(--accent-cyan);
-    color: var(--text-primary);
-  }
-
-  .sql-version {
-    padding: 0.2rem 0.55rem;
-    border: 1px solid color-mix(in srgb, var(--accent-amber) 45%, transparent);
-    border-radius: 0.25rem;
-    color: var(--accent-amber);
-    font-family: var(--font-mono);
-    font-size: 0.75rem;
-    white-space: nowrap;
-    cursor: help;
-  }
+  .facts .markdown { margin-left: auto; }
 
   .sql-note {
-    margin-top: 0.75rem;
-    padding: 0.5rem 0.75rem;
-    border-left: 2px solid var(--accent-amber);
-    background: var(--bg-surface);
-    border-radius: 0 6px 6px 0;
-    font-size: 0.875rem;
-    color: var(--text-secondary);
+    margin-top: 12px;
+    padding: 8px 12px;
+    border-radius: var(--radius-md);
+    background: var(--warning-bg);
+    color: var(--warning-fg);
+    font-size: 14px;
   }
 
-  .sql-note strong {
-    color: var(--text-primary);
+  .sql-note strong { font-weight: 600; }
+
+  .page-body {
+    display: grid;
+    grid-template-columns: minmax(0, var(--prose-max));
+    gap: 56px;
+    align-items: start;
+    margin-top: 32px;
   }
 
-  .updated,
-  .reading-time {
-    color: var(--text-muted);
+  .has-toc .page-body {
+    grid-template-columns: minmax(0, var(--prose-max)) 220px;
   }
 
-  .reading-time::before {
-    content: '·';
-    margin-right: 1rem;
+  .has-toc .page-body > :global(.toc) {
+    grid-column: 2;
+    grid-row: 1;
   }
 
-  /* Pages with contents: a second column for the sticky sidebar on wide screens */
-  @media (min-width: 1200px) {
-    .content-page.has-toc {
-      max-width: calc(800px + 14rem + 4rem);
-    }
+  .content-page > :global(:not(.page-header):not(.page-body)) {
+    max-width: var(--prose-max);
+  }
 
-    .has-toc > :global(:not(.page-body)) {
-      max-width: 800px;
-    }
-
+  @media (max-width: 1199px) { /* matches TableOfContents: sidebar from 1200px */
     .has-toc .page-body {
-      display: grid;
-      grid-template-columns: minmax(0, 800px) 14rem;
-      gap: 4rem;
-      align-items: start;
+      grid-template-columns: minmax(0, 1fr);
     }
 
     .has-toc .page-body > :global(.toc) {
-      grid-column: 2;
-      grid-row: 1;
+      grid-column: auto;
+      grid-row: auto;
     }
   }
 
-  .content {
-    line-height: 1.7;
+  @media (max-width: 640px) {
+    .page-header h1 { font-size: 29px; }
+    .facts { gap: 10px 20px; }
+    .facts .markdown { margin-left: 0; }
   }
-
-  /* Clear the fixed site header when jumping to a heading */
-  .content :global(h2),
-  .content :global(h3) {
-    scroll-margin-top: 6rem;
-  }
-
-  @media (max-width: 768px) {
-    .content :global(h2),
-    .content :global(h3) {
-      scroll-margin-top: 8.5rem;
-    }
-  }
-
-  .content :global(h2) {
-    margin-top: 2.5rem;
-    margin-bottom: 1rem;
-    font-size: 1.75rem;
-    font-weight: 600;
-  }
-
-  .content :global(h3) {
-    margin-top: 2rem;
-    margin-bottom: 0.75rem;
-    font-size: 1.375rem;
-    font-weight: 600;
-  }
-
-  .content :global(pre) {
-    margin: 1.5rem 0;
-    padding: 1.25rem;
-    border-radius: 0.5rem;
-    overflow-x: auto;
-    background: var(--bg-surface) !important;
-    border: 1px solid var(--border-subtle);
-  }
-
-  .content :global(code) {
-    font-family: var(--font-mono);
-    font-size: 0.875rem;
-  }
-
-  .content :global(p code) {
-    background: var(--bg-surface);
-    padding: 0.125rem 0.375rem;
-    border-radius: 0.25rem;
-    color: var(--text-code);
-  }
-
-  .content :global(ul),
-  .content :global(ol) {
-    margin: 1rem 0;
-    padding-left: 1.5rem;
-  }
-
-  .content :global(li) {
-    margin: 0.5rem 0;
-  }
-
-  .content :global(a) {
-    color: var(--link);
-    text-decoration: none;
-  }
-
-  .content :global(a:hover) {
-    text-decoration: underline;
-  }
-
-  /* Jargon tooltips (styled in each pattern): an invisible tooltip still takes up space and made
-     pages scroll sideways on phones, so it only exists while it is showing */
-  .content :global(.jargon:not(:hover):not(:focus))::after {
-    display: none;
-  }
-
-  /* Code copy button */
-  .content :global(.code-block-wrapper) {
-    position: relative;
-  }
-
-  .content :global(.copy-button) {
-    position: absolute;
-    top: 0.75rem;
-    right: 0.75rem;
-    padding: 0.375rem 0.75rem;
-    background: var(--bg-elevated);
-    border: 1px solid var(--border);
-    border-radius: 0.25rem;
-    color: var(--text-secondary);
-    font-size: 0.75rem;
-    font-family: var(--font-mono);
-    cursor: pointer;
-    transition: background 0.2s, color 0.2s;
-    z-index: 10;
-  }
-
-  .content :global(.copy-button:hover) {
-    background: var(--accent-coral);
-    color: var(--bg-deep);
-    border-color: var(--accent-coral);
-  }
-
-  .content :global(.copy-button.copied) {
-    color: var(--accent-lime);
-    border-color: var(--accent-lime);
-  }
+</style>

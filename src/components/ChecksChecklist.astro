@@ -176,7 +176,7 @@
   }
 
   .checklist label:hover {
-    background: var(--bg-surface);
+    background: var(--surface-card);
     border-color: var(--border-subtle);
   }
 
@@ -185,7 +185,7 @@
     width: 1.05rem;
     height: 1.05rem;
     margin-top: 0.3rem;
-    accent-color: var(--accent-lime);
+    accent-color: var(--accent);
     cursor: pointer;
   }
 
@@ -203,7 +203,7 @@
     gap: 0.75rem 1rem;
     margin: 1rem 0 1.5rem;
     padding: 0.875rem 1rem;
-    background: var(--bg-surface);
+    background: var(--surface-card);
     border: 1px solid var(--border-subtle);
     border-radius: 10px;
   }
@@ -211,7 +211,7 @@
   .checklist-progress {
     grid-area: bar;
     height: 4px;
-    background: var(--border);
+    background: var(--border-default);
     border-radius: 2px;
     overflow: hidden;
   }
@@ -220,7 +220,7 @@
     display: block;
     height: 100%;
     width: 0;
-    background: var(--accent-lime);
+    background: var(--accent);
     transition: width 0.2s ease;
   }
 
@@ -228,11 +228,11 @@
     grid-area: count;
     font-family: var(--font-mono);
     font-size: 0.8rem;
-    color: var(--text-secondary);
+    color: var(--text-body);
   }
 
   .checklist-toolbar.complete .checklist-count {
-    color: var(--accent-lime);
+    color: var(--success-fg);
   }
 
   .checklist-toolbar.complete .checklist-count::after {
@@ -252,10 +252,10 @@
     align-items: center;
     gap: 0.4rem;
     padding: 0.35rem 0.75rem;
-    background: var(--bg-elevated);
-    border: 1px solid var(--border);
+    background: var(--surface-raised);
+    border: 1px solid var(--border-default);
     border-radius: 6px;
-    color: var(--text-secondary);
+    color: var(--text-body);
     font-family: var(--font-mono);
     font-size: 0.75rem;
     cursor: pointer;
@@ -264,18 +264,18 @@
 
   .checklist-actions button:hover,
   .checklist-actions button:focus-visible {
-    border-color: var(--accent-lime);
-    color: var(--text-primary);
+    border-color: var(--accent);
+    color: var(--text-strong);
   }
 
   .checklist-copy[data-state='copied'] {
-    border-color: var(--accent-lime);
-    color: var(--accent-lime);
+    border-color: var(--accent);
+    color: var(--accent);
   }
 
   .checklist-copy[data-state='error'] {
-    border-color: var(--accent-coral);
-    color: var(--accent-coral);
+    border-color: var(--danger-fg);
+    color: var(--danger-fg);
   }
 
   @media (max-width: 480px) {

@@ -31,72 +31,54 @@ const { pages, track } = Astro.props;
 <style>
   .page-list {
     list-style: none;
-    margin: 0;
-    padding: 0;
-    border: 1px solid var(--border-subtle);
-    border-radius: 16px;
-    overflow: hidden;
-  }
-
-  .page-list li {
-    margin: 0;
-  }
-
-  .page-list li + li {
-    border-top: 1px solid var(--border-subtle);
+    border-top: 1px solid var(--border-default);
   }
 
   .page-list a {
     display: grid;
-    grid-template-columns: 6.5rem minmax(0, 1fr) auto;
+    grid-template-columns: 112px minmax(0, 1fr) auto;
     align-items: baseline;
-    gap: 1rem;
-    padding: 1rem 1.25rem;
-    color: var(--text-primary);
+    gap: 16px;
+    padding: 12px 8px;
+    border-bottom: 1px solid var(--border-subtle);
+    color: var(--text-body);
     text-decoration: none;
-    transition: background 0.2s ease;
+    transition: background var(--dur-fast) var(--ease-out);
   }
 
   .page-list a:hover {
-    background: var(--bg-surface);
-    text-decoration: none;
-  }
-
-  .page-list a:focus-visible {
-    outline: 2px solid var(--accent-cyan);
-    outline-offset: -2px;
-  }
-
-  .page-list :global(.type-label) {
-    justify-self: start;
+    background: var(--surface-card);
+    color: var(--text-body);
   }
 
   .text {
     display: grid;
-    gap: 0.2rem;
+    gap: 2px;
   }
 
   .title {
-    font-weight: 500;
+    color: var(--text-strong);
+    font-weight: 600;
   }
 
   .description {
-    font-size: 0.875rem;
     color: var(--text-muted);
+    font-size: var(--fs-small);
     line-height: 1.5;
   }
 
   .date {
-    font-family: var(--font-mono);
-    font-size: 0.8rem;
     color: var(--text-muted);
+    font-family: var(--font-mono);
+    font-size: 12.5px;
     white-space: nowrap;
   }
 
   @media (max-width: 600px) {
     .page-list a {
       grid-template-columns: minmax(0, 1fr);
-      gap: 0.4rem;
+      gap: 6px;
+      padding: 12px 4px;
     }
 
     .date {
