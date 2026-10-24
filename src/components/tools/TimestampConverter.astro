@@ -1,0 +1,122 @@
+---
+// Timestamp converter for the formats integrations exchange
+import '../../styles/tools.css';
+---
+
+<div class="tool" data-tool="timestamp-converter" data-pagefind-ignore>
+  <label>
+    Timestamp or date
+    <input type="text" data-field="input" placeholder="1761314585, 2026-10-24T14:03:05Z, /Date(1761314585000)/" spellcheck="false" />
+  </label>
+
+  <div class="tool-row">
+    <label>
+      Read it as
+      <select data-field="kind">
+        <option value="auto">Detect automatically</option>
+        <option value="unix-s">Unix seconds</option>
+        <option value="unix-ms">Unix milliseconds</option>
+        <option value="unix-us">Unix microseconds</option>
+        <option value="unix-ns">Unix nanoseconds</option>
+        <option value="ticks">.NET ticks</option>
+        <option value="ms-json">Microsoft JSON date</option>
+        <option value="text">Date text (ISO 8601, HTTP date)</option>
+      </select>
+    </label>
+    <label>
+      Dates with no offset are
+      <select data-field="zone">
+        <option value="utc">UTC</option>
+        <option value="local">Local time</option>
+      </select>
+    </label>
+  </div>
+
+  <div class="tool-actions">
+    <button type="button" class="primary" data-field="convert">Convert</button>
+    <button type="button" data-field="now">Now</button>
+  </div>
+
+  <p class="tool-status" data-field="status" aria-live="polite"></p>
+
+  <div class="tool-table-wrap">
+    <table class="tool-table" data-field="table" hidden>
+      <tbody data-field="rows"></tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+  import { trackToolUse } from '../../scripts/analytics';
+  import { field, setStatus, wireCopyButton } from '../../scripts/tool-ui';
+  import { wireToolState } from '../../scripts/tool-state';
+  import { formatOutputs, KIND_LABELS, parseTimestamp, type InputKind } from '../../scripts/tools/timestamp';
+
+  const root = document.querySelector<HTMLElement>('[data-tool="timestamp-converter"]');
+
+  if (root) {
+    const input = field<HTMLInputElement>(root, 'input');
+    const kind = field<HTMLSelectElement>(root, 'kind');
+    const zone = field<HTMLSelectElement>(root, 'zone');
+    const status = field<HTMLElement>(root, 'status');
+    const table = field<HTMLTableElement>(root, 'table');
+    const body = field<HTMLTableSectionElement>(root, 'rows');
+
+    const show = (ms: number) => {
+      body.replaceChildren(
+        ...formatOutputs(ms).map(({ label, value }) => {
+          const tr = document.createElement('tr');
+          const th = document.createElement('th');
+          th.scope = 'row';
+          th.textContent = label;
+
+          const td = document.createElement('td');
+          td.className = 'mono';
+          td.textContent = value;
+
+          const actions = document.createElement('td');
+          const copy = document.createElement('button');
+          copy.type = 'button';
+          copy.className = 'small';
+          copy.textContent = 'Copy';
+          copy.setAttribute('aria-label', `Copy ${label}`);
+          wireCopyButton(copy, () => value, 'timestamp-converter');
+          actions.append(copy);
+
+          tr.append(th, td, actions);
+          return tr;
+        }),
+      );
+      table.hidden = false;
+    };
+
+    const convert = () => {
+      try {
+        const parsed = parseTimestamp(input.value, kind.value as InputKind, zone.value === 'utc');
+        show(parsed.ms);
+        setStatus(status, `Read as ${KIND_LABELS[parsed.kind]}.`);
+        trackToolUse('timestamp-converter', 'convert');
+      } catch (err) {
+        table.hidden = true;
+        setStatus(status, (err as Error).message, 'error');
+      }
+    };
+
+    field<HTMLButtonElement>(root, 'convert').addEventListener('click', convert);
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') convert();
+    });
+
+    field<HTMLButtonElement>(root, 'now').addEventListener('click', () => {
+      const now = Date.now();
+      input.value = String(now);
+      kind.value = 'unix-ms';
+      show(now);
+      setStatus(status, 'Current time.');
+      trackToolUse('timestamp-converter', 'now');
+    });
+
+    // Share links, and restoring inputs from a link (after the handlers above, so the result can be shown)
+    wireToolState(root, 'timestamp-converter', status);
+  }
+</script>

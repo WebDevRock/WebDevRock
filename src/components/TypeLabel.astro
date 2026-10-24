@@ -1,0 +1,26 @@
+---
+// Small coloured label naming a page's section, e.g. "Pattern"
+import { getSection } from '../lib/content';
+
+interface Props {
+  section: string;
+}
+
+const section = getSection(Astro.props.section);
+---
+
+<span class="type-label" style={`--accent: ${section.accent}`}>{section.singular}</span>
+
+<style>
+  .type-label {
+    flex-shrink: 0;
+    padding: 0.15rem 0.5rem;
+    border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+    border-radius: 6px;
+    color: var(--accent);
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    line-height: 1.5;
+    white-space: nowrap;
+  }
+</style>

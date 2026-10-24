@@ -1,0 +1,124 @@
+---
+import BaseLayout from '../../layouts/BaseLayout.astro';
+import { getTags } from '../../lib/content';
+
+const tags = getTags();
+const alphabetical = [...tags].sort((a, b) => a.slug.localeCompare(b.slug));
+const popular = tags.filter((t) => t.pages.length > 1).slice(0, 12);
+---
+
+<BaseLayout title="Tags" description="Browse WebDevRock's patterns, snippets, tools and guides by topic.">
+  <div class="tags-page">
+    <header class="page-header">
+      <h1>Tags</h1>
+      <p>Every topic across patterns, snippets, tools and guides. The number is how many pages use the tag.</p>
+    </header>
+
+    {popular.length > 0 && (
+      <section aria-labelledby="popular-heading">
+        <h2 id="popular-heading" class="block-title">Most used</h2>
+        <ul class="tag-cloud">
+          {popular.map((tag) => (
+            <li>
+              <a class="tag-chip large" href={`/tags/${tag.slug}/`} data-umami-event="tag-click" data-umami-event-target={`index-popular-${tag.slug}`}>
+                #{tag.label}<span class="count">{tag.pages.length}</span>
+              </a>
+            </li>
+          ))}
+        </ul>
+      </section>
+    )}
+
+    <section aria-labelledby="all-heading">
+      <h2 id="all-heading" class="block-title">All tags (A to Z)</h2>
+      <ul class="tag-cloud">
+        {alphabetical.map((tag) => (
+          <li>
+            <a class="tag-chip" href={`/tags/${tag.slug}/`} data-umami-event="tag-click" data-umami-event-target={`index-${tag.slug}`}>
+              #{tag.label}<span class="count">{tag.pages.length}</span>
+            </a>
+          </li>
+        ))}
+      </ul>
+    </section>
+  </div>
+</BaseLayout>
+
+<style>
+  .tags-page {
+    max-width: 1000px;
+    margin: 0 auto;
+    padding-top: 2rem;
+  }
+
+  .page-header {
+    margin-bottom: 3rem;
+  }
+
+  .page-header h1 {
+    font-family: var(--font-serif);
+    font-size: clamp(2rem, 5vw, 3rem);
+    font-weight: 600;
+    margin-bottom: 0.75rem;
+    letter-spacing: -0.02em;
+  }
+
+  .page-header p {
+    color: var(--text-secondary);
+    max-width: 640px;
+  }
+
+  section + section {
+    margin-top: 3rem;
+  }
+
+  .block-title {
+    margin-bottom: 1.25rem;
+    padding-bottom: 0.75rem;
+    border-bottom: 1px solid var(--border-subtle);
+    font-size: 0.8rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.15em;
+    color: var(--text-muted);
+  }
+
+  .tag-cloud {
+    list-style: none;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+
+  .tag-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.35rem 0.75rem;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-subtle);
+    border-radius: 8px;
+    color: var(--text-secondary);
+    font-family: var(--font-mono);
+    font-size: 0.85rem;
+    text-decoration: none;
+    transition: border-color 0.2s ease, color 0.2s ease;
+  }
+
+  .tag-chip.large {
+    padding: 0.5rem 0.9rem;
+    font-size: 0.95rem;
+    color: var(--text-primary);
+  }
+
+  .tag-chip:hover,
+  .tag-chip:focus-visible {
+    border-color: var(--accent-cyan);
+    color: var(--text-primary);
+  }
+
+  .count {
+    color: var(--text-muted);
+    font-size: 0.75rem;
+  }
+</style>

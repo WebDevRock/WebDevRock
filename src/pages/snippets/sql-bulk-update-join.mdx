@@ -1,0 +1,71 @@
+---
+layout: ../../layouts/ContentLayout.astro
+title: "SQL Server: Bulk Update with JOIN"
+description: "Update many rows from a supplied list of IDs + values using a temp table and JOIN. Ideal for data fixes."
+tags: [sql, sql-server, data-fix, bulk-update]
+updated: "2026-02-14"
+sqlVersion: "2008"
+placeholders:
+  - token: "target_table"
+    label: "Table"
+    hint: "e.g. dbo.Orders"
+  - token: "id"
+    label: "Key column"
+    hint: "e.g. OrderId"
+  - token: "some_column"
+    label: "Column to change"
+    hint: "e.g. Status"
+---
+
+import OpenInTool from '../../components/OpenInTool.astro';
+
+## Problem
+
+You have a list of record IDs and their new values and you need to apply them in one safe, repeatable update.
+
+## Solution
+
+Load the updates into a temp table, preview the join, then run an `UPDATE ... FROM` inside a transaction.
+
+```sql
+-- 1) Load updates
+CREATE TABLE #temp_updates (
+  id INT NOT NULL PRIMARY KEY,              -- match target_table.id type
+  new_some_column NVARCHAR(255) NOT NULL    -- match target_table.some_column type/length
+);
+
+INSERT INTO #temp_updates (id, new_some_column) VALUES
+(123, N'Updated Value A'),
+(456, N'Updated Value B'),
+(789, N'Updated Value C');
+
+-- 2) Preview what will change (always do this first)
+SELECT t.id, t.some_column AS old_value, tu.new_some_column AS new_value
+FROM target_table t
+JOIN #temp_updates tu ON tu.id = t.id;
+
+-- 3) Apply update (transaction makes it easy to rollback if needed)
+BEGIN TRAN;
+
+UPDATE t
+SET t.some_column = tu.new_some_column
+FROM target_table t
+JOIN #temp_updates tu ON tu.id = t.id;
+
+SELECT @@ROWCOUNT AS rows_updated;
+
+-- If the rowcount looks wrong, rollback instead of commit.
+COMMIT; -- or ROLLBACK;
+
+DROP TABLE #temp_updates;
+```
+
+<OpenInTool tool="list-to-sql" values={{ input: '123\tUpdated Value A\n456\tUpdated Value B\n789\tUpdated Value C', format: 'temp' }} label="Build the #temp table from rows pasted from a spreadsheet in List to SQL" />
+
+## Notes
+
+- SQL Server syntax: UPDATE ... FROM and #temp tables are session-scoped.
+- Add a PRIMARY KEY on id to prevent duplicate IDs in the update list.
+- For large lists, insert in batches and consider indexing the temp table if you join on more than one column.
+- If you only want to update changed rows, add: ```WHERE t.some_column <> tu.new_some_column OR t.some_column IS NULL```
+

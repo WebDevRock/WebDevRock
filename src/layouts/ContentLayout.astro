@@ -1,0 +1,360 @@
+---
+import BaseLayout from './BaseLayout.astro';
+import ChecksChecklist from '../components/ChecksChecklist.astro';
+import CopyMarkdown from '../components/CopyMarkdown.astro';
+import PageEndNav from '../components/PageEndNav.astro';
+import PageFeedback from '../components/PageFeedback.astro';
+import PlaceholderPanel from '../components/PlaceholderPanel.astro';
+import TableOfContents from '../components/TableOfContents.astro';
+import { SECTIONS, normalisePath, readingMinutes, sqlVersionLabel, sqlVersionsFrom, tagPath, type Frontmatter } from '../lib/content';
+import type { Placeholder } from '../scripts/placeholders';
+
+interface Props {
+  // MDX parses the full YAML, so lists like placeholders are available here (content.ts only reads the simple fields)
+  frontmatter: Frontmatter & { placeholders?: Placeholder[] };
+  headings?: { depth: number; slug: string; text: string }[];
+}
+
+// MDX pages pass their front matter to the layout as Astro.props.frontmatter, and their headings as Astro.props.headings
+const { title, description, tags, updated, placeholders, sqlVersion, sqlNote } = Astro.props.frontmatter;
+
+const path = normalisePath(Astro.url.pathname);
+const section = SECTIONS.find((s) => s.key === path.split('/')[1]);
+
+// Patterns and AI guides are the long reads: give them a reading time and contents
+const LONG_READ_SECTIONS = ['patterns', 'ai'];
+const longRead = section !== undefined && LONG_READ_SECTIONS.includes(section.key);
+const minutes = longRead ? readingMinutes(path) : undefined;
+const headings = longRead ? Astro.props.headings ?? [] : [];
+const showToc = headings.some((h) => h.depth === 2);
+
+// A "## Checks" section (every pattern has one) becomes a tick list with copy-to-ticket
+const hasChecks = (Astro.props.headings ?? []).some((h) => h.depth === 2 && h.slug === 'checks');
+---
+
+<BaseLayout title={title} description={description} type="article" updated={updated}>
+  <article class:list={['content-page', { 'has-toc': showToc }]} data-pagefind-body data-pagefind-filter={section ? `section:${section.name}` : undefined}>
+    <div class="page-header">
+      <h1>{title}</h1>
+      {description && <p class="description">{description}</p>}
+      <div class="meta">
+        {tags && tags.length > 0 && (
+          <div class="tags">
+            {tags.map((tag) => (
+              <a class="tag" href={tagPath(tag)} data-umami-event="tag-click" data-umami-event-target={`page-${tag}`}>{tag}</a>
+            ))}
+          </div>
+        )}
+        {sqlVersion && (
+          <span class="sql-version" title={`Runs on SQL Server ${sqlVersion} and later, Azure SQL Database and Azure SQL Managed Instance`}>
+            {sqlVersionLabel(sqlVersion)}
+          </span>
+        )}
+        {updated && <span class="updated">Updated: {updated}</span>}
+        {minutes && <span class="reading-time">{minutes} min read</span>}
+        {section && <CopyMarkdown path={path} />}
+      </div>
+      {sqlNote && <p class="sql-note"><strong>Requires:</strong> {sqlNote}</p>}
+      {/* Search filter: one value per release the snippet runs on, so choosing "2014" finds everything that works there */}
+      {sqlVersion && sqlVersionsFrom(sqlVersion).map((v) => (
+        <span hidden data-pagefind-filter="Runs on SQL Server[data-version]" data-version={v}></span>
+      ))}
+    </div>
+    <div class="page-body">
+      {showToc && <TableOfContents headings={headings} />}
+      <div class="content">
+        {placeholders && placeholders.length > 0 && <PlaceholderPanel placeholders={placeholders} />}
+        <slot />
+      </div>
+    </div>
+    {hasChecks && <ChecksChecklist />}
+    {section && <PageFeedback />}
+    <PageEndNav path={path} />
+  </article>
+</BaseLayout>
+
+<script>
+  import { trackEvent } from '../scripts/analytics';
+
+  // Add copy buttons to all code blocks
+  function addCopyButtons() {
+    const codeBlocks = document.querySelectorAll<HTMLElement>('.content pre');
+
+    codeBlocks.forEach((pre, index) => {
+      // Skip if already wrapped
+      if (pre.parentElement?.classList.contains('code-block-wrapper')) {
+        return;
+      }
+
+      // Create wrapper
+      const wrapper = document.createElement('div');
+      wrapper.className = 'code-block-wrapper';
+      
+      // Create copy button
+      const button = document.createElement('button');
+      button.className = 'copy-button';
+      button.textContent = 'Copy';
+      button.setAttribute('aria-label', 'Copy code to clipboard');
+      
+      // Add click handler
+      button.addEventListener('click', async () => {
+        const code = pre.textContent || '';
+        
+        try {
+          await navigator.clipboard.writeText(code);
+          trackEvent('code-copy', {
+            page: location.pathname,
+            section: location.pathname.split('/')[1] || 'home',
+            language: pre.dataset.language || 'text',
+            block: index + 1,
+          });
+          button.textContent = 'Copied!';
+          button.classList.add('copied');
+          
+          setTimeout(() => {
+            button.textContent = 'Copy';
+            button.classList.remove('copied');
+          }, 2000);
+        } catch (err) {
+          console.error('Failed to copy code:', err);
+          button.textContent = 'Error';
+          
+          setTimeout(() => {
+            button.textContent = 'Copy';
+          }, 2000);
+        }
+      });
+      
+      // Wrap the pre element
+      pre.parentNode?.insertBefore(wrapper, pre);
+      wrapper.appendChild(pre);
+      wrapper.appendChild(button);
+    });
+  }
+
+  // Run on initial load
+  addCopyButtons();
+
+  // Re-run after view transitions (if using Astro view transitions)
+  document.addEventListener('astro:page-load', addCopyButtons);
+</script>
+
+<style>
+  .content-page {
+    max-width: 800px;
+    margin: 0 auto;
+  }
+
+  .page-header {
+    margin-bottom: 3rem;
+  }
+
+  .page-header h1 {
+    margin-bottom: 0.5rem;
+    font-size: 2.5rem;
+    font-weight: 600;
+  }
+
+  .description {
+    color: var(--text-secondary);
+    font-size: 1.125rem;
+    margin-bottom: 1rem;
+  }
+
+  .meta {
+    display: flex;
+    gap: 1rem;
+    align-items: center;
+    flex-wrap: wrap;
+    font-size: 0.875rem;
+  }
+
+  .tags {
+    display: flex;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+  }
+
+  .tag {
+    background: var(--bg-surface);
+    color: var(--text-muted);
+    padding: 0.25rem 0.625rem;
+    border: 1px solid transparent;
+    border-radius: 0.25rem;
+    font-family: var(--font-mono);
+    text-decoration: none;
+    transition: border-color 0.2s ease, color 0.2s ease;
+  }
+
+  .tag:hover,
+  .tag:focus-visible {
+    border-color: var(--accent-cyan);
+    color: var(--text-primary);
+  }
+
+  .sql-version {
+    padding: 0.2rem 0.55rem;
+    border: 1px solid color-mix(in srgb, var(--accent-amber) 45%, transparent);
+    border-radius: 0.25rem;
+    color: var(--accent-amber);
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    white-space: nowrap;
+    cursor: help;
+  }
+
+  .sql-note {
+    margin-top: 0.75rem;
+    padding: 0.5rem 0.75rem;
+    border-left: 2px solid var(--accent-amber);
+    background: var(--bg-surface);
+    border-radius: 0 6px 6px 0;
+    font-size: 0.875rem;
+    color: var(--text-secondary);
+  }
+
+  .sql-note strong {
+    color: var(--text-primary);
+  }
+
+  .updated,
+  .reading-time {
+    color: var(--text-muted);
+  }
+
+  .reading-time::before {
+    content: '·';
+    margin-right: 1rem;
+  }
+
+  /* Pages with contents: a second column for the sticky sidebar on wide screens */
+  @media (min-width: 1200px) {
+    .content-page.has-toc {
+      max-width: calc(800px + 14rem + 4rem);
+    }
+
+    .has-toc > :global(:not(.page-body)) {
+      max-width: 800px;
+    }
+
+    .has-toc .page-body {
+      display: grid;
+      grid-template-columns: minmax(0, 800px) 14rem;
+      gap: 4rem;
+      align-items: start;
+    }
+
+    .has-toc .page-body > :global(.toc) {
+      grid-column: 2;
+      grid-row: 1;
+    }
+  }
+
+  .content {
+    line-height: 1.7;
+  }
+
+  /* Clear the fixed site header when jumping to a heading */
+  .content :global(h2),
+  .content :global(h3) {
+    scroll-margin-top: 6rem;
+  }
+
+  @media (max-width: 768px) {
+    .content :global(h2),
+    .content :global(h3) {
+      scroll-margin-top: 8.5rem;
+    }
+  }
+
+  .content :global(h2) {
+    margin-top: 2.5rem;
+    margin-bottom: 1rem;
+    font-size: 1.75rem;
+    font-weight: 600;
+  }
+
+  .content :global(h3) {
+    margin-top: 2rem;
+    margin-bottom: 0.75rem;
+    font-size: 1.375rem;
+    font-weight: 600;
+  }
+
+  .content :global(pre) {
+    margin: 1.5rem 0;
+    padding: 1.25rem;
+    border-radius: 0.5rem;
+    overflow-x: auto;
+    background: var(--bg-surface) !important;
+    border: 1px solid var(--border-subtle);
+  }
+
+  .content :global(code) {
+    font-family: var(--font-mono);
+    font-size: 0.875rem;
+  }
+
+  .content :global(p code) {
+    background: var(--bg-surface);
+    padding: 0.125rem 0.375rem;
+    border-radius: 0.25rem;
+    color: var(--text-code);
+  }
+
+  .content :global(ul),
+  .content :global(ol) {
+    margin: 1rem 0;
+    padding-left: 1.5rem;
+  }
+
+  .content :global(li) {
+    margin: 0.5rem 0;
+  }
+
+  .content :global(a) {
+    color: var(--link);
+    text-decoration: none;
+  }
+
+  .content :global(a:hover) {
+    text-decoration: underline;
+  }
+
+  /* Jargon tooltips (styled in each pattern): an invisible tooltip still takes up space and made
+     pages scroll sideways on phones, so it only exists while it is showing */
+  .content :global(.jargon:not(:hover):not(:focus))::after {
+    display: none;
+  }
+
+  /* Code copy button */
+  .content :global(.code-block-wrapper) {
+    position: relative;
+  }
+
+  .content :global(.copy-button) {
+    position: absolute;
+    top: 0.75rem;
+    right: 0.75rem;
+    padding: 0.375rem 0.75rem;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: 0.25rem;
+    color: var(--text-secondary);
+    font-size: 0.75rem;
+    font-family: var(--font-mono);
+    cursor: pointer;
+    transition: background 0.2s, color 0.2s;
+    z-index: 10;
+  }
+
+  .content :global(.copy-button:hover) {
+    background: var(--accent-coral);
+    color: var(--bg-deep);
+    border-color: var(--accent-coral);
+  }
+
+  .content :global(.copy-button.copied) {
+    color: var(--accent-lime);
+    border-color: var(--accent-lime);
+  }

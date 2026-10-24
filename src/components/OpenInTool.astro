@@ -1,0 +1,90 @@
+---
+// Link from a snippet to a tool with example data filled in. Use on one line so the Markdown copies can turn
+// it into a plain link (src/lib/llms.ts):
+//
+//   <OpenInTool tool="list-to-sql" values={{ input: '123\n456', format: 'json' }} label="Make the JSON in List to SQL" />
+//
+// Field names are checked against TOOL_FIELDS at build time. On snippets with a "Your values" panel, the
+// reader's names are carried into the link too (src/scripts/placeholders.ts).
+import { getContentPages } from '../lib/content';
+import { toolLink, toolPath, type ToolValues } from '../lib/tool-links';
+
+interface Props {
+  tool: string;
+  values: ToolValues;
+  label?: string;
+}
+
+const { tool, values, label } = Astro.props;
+const page = getContentPages().find((p) => p.path === toolPath(tool));
+if (!page) throw new Error(`OpenInTool: no tool page at ${toolPath(tool)}`);
+
+const href = toolLink(tool, values);
+---
+
+<a
+  class="open-in-tool"
+  href={href}
+  data-open-in-tool
+  data-pagefind-ignore
+  data-umami-event="open-in-tool"
+  data-umami-event-tool={tool}
+>
+  <span class="glyph" aria-hidden="true">&gt;_</span>
+  <span class="text">
+    <span class="label">{label ?? `Open this in ${page.frontmatter.title}`}</span>
+    <span class="hint">Opens the tool with this example filled in</span>
+  </span>
+  <span class="arrow" aria-hidden="true">→</span>
+</a>
+
+<style>
+  .open-in-tool {
+    display: flex;
+    align-items: center;
+    gap: 0.875rem;
+    margin: 1rem 0 1.75rem;
+    padding: 0.75rem 1rem;
+    background: var(--bg-surface);
+    border: 1px solid color-mix(in srgb, var(--accent-cyan) 35%, var(--border-subtle));
+    border-radius: 10px;
+    color: var(--text-primary);
+    text-decoration: none;
+    transition: border-color 0.2s ease, transform 0.2s ease;
+  }
+
+  .open-in-tool:hover,
+  .open-in-tool:focus-visible {
+    border-color: var(--accent-cyan);
+    text-decoration: none;
+    transform: translateY(-1px);
+  }
+
+  .glyph {
+    flex: none;
+    font-family: var(--font-mono);
+    font-weight: 600;
+    color: var(--accent-cyan);
+  }
+
+  .text {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+  }
+
+  .label {
+    font-weight: 500;
+    line-height: 1.4;
+  }
+
+  .hint {
+    font-size: 0.8rem;
+    color: var(--text-muted);
+  }
+
+  .arrow {
+    margin-left: auto;
+    color: var(--accent-cyan);
+  }
+</style>

@@ -1,0 +1,129 @@
+---
+// "Copy as Markdown": copies the page's clean Markdown copy (src/pages/[section]/[slug].md.ts), handy for
+// pasting into an AI chat or notes. The "View .md" link works without JavaScript.
+interface Props {
+  path: string; // normalised content page path, e.g. /snippets/sql-bulk-update-join/
+}
+
+const mdUrl = Astro.props.path.replace(/\/$/, '.md');
+---
+
+<div class="copy-markdown" data-pagefind-ignore>
+  <button type="button" class="copy-md-button" data-copy-markdown={mdUrl} hidden>
+    <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="9" y="9" width="12" height="12" rx="2"></rect>
+      <path d="M5 15V5a2 2 0 0 1 2-2h10"></path>
+    </svg>
+    <span data-label>Copy as Markdown</span>
+  </button>
+  <a class="view-md" href={mdUrl} data-umami-event="markdown-view" data-umami-event-page={Astro.props.path}>View .md</a>
+</div>
+
+<script>
+  import { trackEvent } from '../scripts/analytics';
+  import { customiseMarkdown } from '../scripts/placeholders';
+
+  const button = document.querySelector<HTMLButtonElement>('[data-copy-markdown]');
+
+  if (button && navigator.clipboard) {
+    const label = button.querySelector<HTMLElement>('[data-label]')!;
+    const url = button.dataset.copyMarkdown!;
+    let reset = 0;
+
+    const setLabel = (text: string, state = '') => {
+      label.textContent = text;
+      button.dataset.state = state;
+      clearTimeout(reset);
+      if (state) reset = window.setTimeout(() => setLabel('Copy as Markdown'), 2000);
+    };
+
+    const fetchMarkdown = async () => {
+      const response = await fetch(url);
+      if (!response.ok) throw new Error(`${url}: ${response.status}`);
+      return customiseMarkdown(await response.text()); // the reader's values from the snippet's "Your values" panel
+    };
+
+    button.hidden = false;
+    button.addEventListener('click', async () => {
+      setLabel('Copying…');
+      try {
+        // Safari only allows clipboard writes started straight from the click, so hand it the pending
+        // download as a ClipboardItem instead of writing after the fetch finishes
+        if (typeof ClipboardItem !== 'undefined' && 'write' in navigator.clipboard) {
+          const blob = fetchMarkdown().then((text) => new Blob([text], { type: 'text/plain' }));
+          await navigator.clipboard.write([new ClipboardItem({ 'text/plain': blob })]);
+        } else {
+          await navigator.clipboard.writeText(await fetchMarkdown());
+        }
+        trackEvent('markdown-copy', { page: location.pathname });
+        setLabel('Copied!', 'copied');
+      } catch (err) {
+        console.error('Failed to copy Markdown:', err);
+        setLabel('Copy failed: use View .md', 'error');
+      }
+    });
+  }
+</script>
+
+<style>
+  .copy-markdown {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin-left: auto;
+  }
+
+  .copy-md-button {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.3rem 0.7rem;
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text-secondary);
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    cursor: pointer;
+    transition: border-color 0.2s ease, color 0.2s ease;
+  }
+
+  .copy-md-button[hidden] {
+    display: none;
+  }
+
+  .copy-md-button:hover,
+  .copy-md-button:focus-visible {
+    border-color: var(--accent-cyan);
+    color: var(--text-primary);
+  }
+
+  .copy-md-button[data-state='copied'] {
+    border-color: var(--accent-lime);
+    color: var(--accent-lime);
+  }
+
+  .copy-md-button[data-state='error'] {
+    border-color: var(--accent-coral);
+    color: var(--accent-coral);
+  }
+
+  .view-md {
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    text-decoration: none;
+  }
+
+  .view-md:hover,
+  .view-md:focus-visible {
+    color: var(--accent-cyan);
+  }
+
+  @media (max-width: 768px) {
+    .copy-markdown {
+      margin-left: 0;
+      width: 100%;
+    }
+  }
+</style>

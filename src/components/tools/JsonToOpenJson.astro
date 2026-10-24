@@ -1,0 +1,94 @@
+---
+// JSON to OPENJSON generator: infers a WITH (...) schema from a sample payload
+import '../../styles/tools.css';
+---
+
+<div class="tool" data-tool="json-to-openjson" data-pagefind-ignore>
+  <label>
+    Sample JSON (an API response, a webhook body, or an export file)
+    <textarea data-field="input" spellcheck="false" placeholder={'{ "data": [ { "id": 1, "name": "Example" } ] }'}></textarea>
+  </label>
+
+  <div class="tool-row">
+    <label>
+      Path to the rows (leave empty to detect)
+      <input type="text" data-field="path" placeholder="$.data" spellcheck="false" />
+    </label>
+  </div>
+
+  <div class="tool-row">
+    <label class="tool-check">
+      <input type="checkbox" data-field="flatten" checked />
+      Flatten nested objects
+    </label>
+    <label class="tool-check">
+      <input type="checkbox" data-field="sample" checked />
+      Include sample in DECLARE
+    </label>
+    <label class="tool-check">
+      <input type="checkbox" data-field="temp" />
+      SELECT INTO #json_rows
+    </label>
+  </div>
+
+  <div class="tool-actions">
+    <button type="button" class="primary" data-field="generate">Generate SQL</button>
+    <button type="button" data-field="copy">Copy</button>
+  </div>
+
+  <p class="tool-status" data-field="status" aria-live="polite"></p>
+
+  <label>
+    SQL
+    <textarea data-field="output" readonly spellcheck="false"></textarea>
+  </label>
+</div>
+
+<script>
+  import { trackToolUse } from '../../scripts/analytics';
+  import { field, setStatus, wireCopyButton } from '../../scripts/tool-ui';
+  import { wireToolState } from '../../scripts/tool-state';
+  import { buildOpenJson } from '../../scripts/tools/json-to-openjson';
+
+  const root = document.querySelector<HTMLElement>('[data-tool="json-to-openjson"]');
+
+  if (root) {
+    const input = field<HTMLTextAreaElement>(root, 'input');
+    const path = field<HTMLInputElement>(root, 'path');
+    const flatten = field<HTMLInputElement>(root, 'flatten');
+    const sample = field<HTMLInputElement>(root, 'sample');
+    const temp = field<HTMLInputElement>(root, 'temp');
+    const output = field<HTMLTextAreaElement>(root, 'output');
+    const status = field<HTMLElement>(root, 'status');
+
+    field<HTMLButtonElement>(root, 'generate').addEventListener('click', () => {
+      try {
+        const result = buildOpenJson(input.value, {
+          path: path.value,
+          flatten: flatten.checked,
+          includeSample: sample.checked,
+          intoTemp: temp.checked,
+        });
+        output.value = result.sql;
+        if (!path.value.trim()) path.placeholder = result.path;
+
+        const noted = result.columns.filter((c) => c.note).length;
+        const message = `${result.columns.length} columns from ${result.rows} row${result.rows === 1 ? '' : 's'} at ${result.path}`;
+        setStatus(
+          status,
+          noted ? `${message} · ${noted} column${noted === 1 ? '' : 's'} need a type check (see comments)` : message,
+          noted ? 'warn' : 'info',
+        );
+        trackToolUse('json-to-openjson', 'generate');
+      } catch (err) {
+        output.value = '';
+        setStatus(status, (err as Error).message, 'error');
+      }
+    });
+
+    wireCopyButton(field<HTMLButtonElement>(root, 'copy'), () => output.value, 'json-to-openjson');
+
+    // Share links, and restoring inputs from a link (after the handlers above, so the result can be shown)
+    wireToolState(root, 'json-to-openjson', status);
+  }
+</script>

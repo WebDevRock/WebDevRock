@@ -1,0 +1,62 @@
+---
+layout: ../../layouts/ContentLayout.astro
+title: "SQL Server: Safe Bulk DELETE Using JOIN"
+description: "Delete rows using a JOIN with a preview step to avoid accidental data loss."
+tags: [sql, sql-server, data-fix, delete]
+updated: "2026-02-16"
+sqlVersion: "2008"
+placeholders:
+  - token: "target_table"
+    label: "Table"
+    hint: "e.g. dbo.Orders"
+  - token: "id"
+    label: "Key column"
+    hint: "e.g. OrderId"
+  - token: "backup_table_20260216"
+    label: "Backup table"
+    hint: "e.g. backup_Orders_TICKET123"
+---
+
+import OpenInTool from '../../components/OpenInTool.astro';
+
+## Problem
+
+You need to delete a specific set of rows based on a list or staging table, but want to verify exactly what will be removed before running the delete.
+
+## Solution
+
+Preview the affected rows using a SELECT, then run the DELETE using the same JOIN.
+
+```sql
+-- Preview first
+SELECT t.*
+FROM target_table t
+JOIN #rows_to_delete d ON d.id = t.id;
+
+-- Apply delete
+BEGIN TRAN;
+
+DELETE t
+FROM target_table t
+JOIN #rows_to_delete d ON d.id = t.id;
+
+SELECT @@ROWCOUNT AS rows_deleted;
+
+-- COMMIT;
+-- ROLLBACK;
+```
+
+<OpenInTool tool="data-fix-script" values={{ action: 'delete', mode: 'join', table: 'target_table', keys: 'id', source: '#rows_to_delete', ticket: 'INC-1234' }} label="Generate the whole delete (preview, backup, delete, restore) in the Data Fix Script Builder" />
+
+## Notes
+- Always run the SELECT preview first.
+- Wrapping in a transaction allows quick rollback if the row count is unexpected.
+- Useful for removing duplicate or incorrectly imported data.
+- Consider backing up affected rows first:
+
+```sql
+SELECT *
+INTO backup_table_20260216
+FROM target_table t
+JOIN #rows_to_delete d ON d.id = t.id;
+```

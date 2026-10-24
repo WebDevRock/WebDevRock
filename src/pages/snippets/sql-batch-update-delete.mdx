@@ -1,0 +1,91 @@
+---
+layout: ../../layouts/ContentLayout.astro
+title: "SQL Server: Update or Delete Millions of Rows in Batches"
+description: "Change large volumes of data in small batches to avoid table locks, log growth and blocking."
+tags: [sql, sql-server, data-fix, performance]
+updated: "2026-10-24"
+sqlVersion: "2008"
+placeholders:
+  - token: "target_table"
+    label: "Table"
+    hint: "e.g. dbo.Orders"
+  - token: "created_at"
+    label: "Date column"
+    hint: "e.g. CreatedDate"
+  - token: "2024-01-01"
+    label: "Cut-off date"
+    hint: "yyyy-mm-dd"
+  - token: "4000"
+    label: "Batch size"
+    hint: "under 5,000"
+  - token: "status"
+    label: "Column to update (update example)"
+  - token: "archived"
+    label: "New value (update example)"
+---
+
+import OpenInTool from '../../components/OpenInTool.astro';
+
+## Problem
+
+You need to update or delete millions of rows. Doing it in one statement locks the whole table, fills the transaction log and blocks everyone else until it finishes (or fails and rolls back for just as long).
+
+## Solution
+
+Loop over the data with `TOP (n)` so each batch is a small, short transaction. Stop when a batch affects no rows.
+
+```sql
+-- 1) Preview how many rows are in scope
+SELECT COUNT(*) AS rows_in_scope
+FROM target_table
+WHERE created_at < '2024-01-01';
+
+-- 2) Delete in batches
+DECLARE @batch_size INT = 4000;
+DECLARE @rows INT = 1;
+DECLARE @total INT = 0;
+
+WHILE @rows > 0
+BEGIN
+  DELETE TOP (@batch_size)
+  FROM target_table
+  WHERE created_at < '2024-01-01';
+
+  SET @rows = @@ROWCOUNT;
+  SET @total += @rows;
+
+  RAISERROR('Deleted %d rows so far', 0, 1, @total) WITH NOWAIT;  -- progress appears immediately
+
+  IF @rows > 0 WAITFOR DELAY '00:00:01';  -- give other sessions a turn
+END;
+```
+
+The same loop works for updates, but the `WHERE` clause **must exclude rows that are already updated**, or every batch picks the same rows and the loop never ends:
+
+```sql
+DECLARE @batch_size INT = 4000;
+DECLARE @rows INT = 1;
+
+WHILE @rows > 0
+BEGIN
+  UPDATE TOP (@batch_size) t
+  SET t.status = 'archived'
+  FROM target_table t
+  WHERE t.created_at < '2024-01-01'
+    AND (t.status <> 'archived' OR t.status IS NULL);  -- skip rows already done
+
+  SET @rows = @@ROWCOUNT;
+
+  IF @rows > 0 WAITFOR DELAY '00:00:01';
+END;
+```
+
+<OpenInTool tool="data-fix-script" values={{ table: 'target_table', keys: 'id', columns: 'status', mode: 'filter', set: "status = 'archived'", where: "t.created_at < '2024-01-01'", batched: true, 'batch-size': 4000, ticket: 'INC-1234' }} label="Generate this batched update with a backup and rollback in the Data Fix Script Builder" />
+
+## Notes
+
+- Don't wrap the loop in one big transaction. That brings back the locking and log growth you're avoiding. Each batch commits on its own, so back up the rows first (see [Record Changed Rows with OUTPUT INTO](/snippets/sql-output-into-audit)).
+- Keep batches under about 5,000 rows. SQL Server tries to escalate to a table lock once one statement holds around 5,000 locks.
+- Index the column(s) in the `WHERE` clause, otherwise every batch scans the whole table.
+- The loop is safe to stop and rerun: it carries on with whatever is left.
+- In the full recovery model, keep log backups running during long jobs so the log can be reused between batches.

@@ -1,0 +1,231 @@
+---
+import BaseLayout from '../../layouts/BaseLayout.astro';
+import Card from '../../components/Card.astro';
+import { SQL_VERSIONS, getContentPages, sqlVersionLabel } from '../../lib/content';
+
+// From the shared content index (front matter only), sorted by title
+const snippets = getContentPages()
+  .filter((page) => page.section === 'snippets')
+  .sort((a, b) => a.frontmatter.title.localeCompare(b.frontmatter.title));
+
+const sqlCount = snippets.filter((s) => s.frontmatter.sqlVersion).length;
+---
+
+<BaseLayout title="Snippets" description="Small copy/paste solutions with short explanations, mostly SQL Server. Quick fixes and reusable code blocks.">
+  <div class="category-page">
+    <div class="page-header">
+      <h1>Snippets</h1>
+      <p>Small copy/paste solutions with short explanations. Quick fixes and reusable code blocks.</p>
+    </div>
+
+    <!-- Shown by the script below; without JavaScript every snippet is listed -->
+    <div class="version-filter" data-version-filter hidden>
+      <p class="filter-label" id="version-filter-label">My SQL Server</p>
+      <div class="filter-options" role="radiogroup" aria-labelledby="version-filter-label">
+        <button type="button" role="radio" aria-checked="true" data-version="">Any</button>
+        {SQL_VERSIONS.map((version) => (
+          <button type="button" role="radio" aria-checked="false" data-version={version}>{version}</button>
+        ))}
+        <button type="button" role="radio" aria-checked="false" data-version="azure" title="Azure SQL Database and Managed Instance run every snippet">Azure SQL</button>
+      </div>
+      <p class="filter-status" role="status" data-filter-status>
+        {sqlCount} SQL Server snippets, each labelled with the earliest version it runs on.
+      </p>
+    </div>
+
+    <div class="cards">
+      {snippets.map((snippet) => (
+        <div class="card-slot" data-sql-version={snippet.frontmatter.sqlVersion ?? ''}>
+          <Card
+            title={snippet.frontmatter.title}
+            href={snippet.path}
+            tags={snippet.frontmatter.tags}
+            description={snippet.frontmatter.description}
+            label={snippet.frontmatter.sqlVersion ? sqlVersionLabel(snippet.frontmatter.sqlVersion) : undefined}
+          />
+        </div>
+      ))}
+    </div>
+  </div>
+</BaseLayout>
+
+<script>
+  import { trackEvent } from '../../scripts/analytics';
+
+  const filter = document.querySelector<HTMLElement>('[data-version-filter]');
+
+  if (filter) {
+    const buttons = [...filter.querySelectorAll<HTMLButtonElement>('button[data-version]')];
+    const versions = buttons.map((b) => b.dataset.version!).filter((v) => /^\d+$/.test(v));
+    const slots = [...document.querySelectorAll<HTMLElement>('[data-sql-version]')];
+    const status = filter.querySelector<HTMLElement>('[data-filter-status]')!;
+    const initialStatus = status.textContent;
+    const storageKey = 'snippets:sql-version';
+
+    // A snippet is shown when the chosen release is at least its minimum. Azure SQL runs everything,
+    // and snippets that aren't SQL Server specific are always shown.
+    const runsOn = (minimum: string, chosen: string) =>
+      !minimum || !chosen || chosen === 'azure' || versions.indexOf(chosen) >= versions.indexOf(minimum);
+
+    const apply = (chosen: string) => {
+      buttons.forEach((b) => b.setAttribute('aria-checked', String(b.dataset.version === chosen)));
+      let hidden = 0;
+      for (const slot of slots) {
+        const show = runsOn(slot.dataset.sqlVersion ?? '', chosen);
+        slot.hidden = !show;
+        if (!show) hidden++;
+      }
+      const name = chosen === 'azure' ? 'Azure SQL' : `SQL Server ${chosen}`;
+      status.textContent = !chosen
+        ? initialStatus
+        : hidden
+          ? `Showing what runs on ${name}. ${hidden} ${hidden === 1 ? 'snippet needs' : 'snippets need'} a newer version.`
+          : `Everything here runs on ${name}.`;
+
+      // Keep the choice in the address so a filtered list can be shared, and remember it in this browser
+      const url = new URL(location.href);
+      if (chosen) url.searchParams.set('sqlserver', chosen);
+      else url.searchParams.delete('sqlserver');
+      history.replaceState(null, '', url);
+      try {
+        if (chosen) localStorage.setItem(storageKey, chosen);
+        else localStorage.removeItem(storageKey);
+      } catch {
+        // Blocked storage: the choice just isn't remembered
+      }
+    };
+
+    let initial = new URLSearchParams(location.search).get('sqlserver') ?? '';
+    if (!initial) {
+      try {
+        initial = localStorage.getItem(storageKey) ?? '';
+      } catch {
+        // As above
+      }
+    }
+    if (!buttons.some((b) => b.dataset.version === initial)) initial = '';
+
+    filter.addEventListener('click', (event) => {
+      const button = (event.target as HTMLElement).closest<HTMLButtonElement>('button[data-version]');
+      if (!button) return;
+      apply(button.dataset.version!);
+      trackEvent('version-filter', { version: button.dataset.version || 'any', from: 'snippets' });
+    });
+
+    // Arrow keys move between options, as in a radio group
+    filter.addEventListener('keydown', (event) => {
+      const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
+      if (index === -1 || !['ArrowLeft', 'ArrowRight'].includes(event.key)) return;
+      event.preventDefault();
+      const next = buttons[(index + (event.key === 'ArrowRight' ? 1 : buttons.length - 1)) % buttons.length];
+      next.focus();
+      next.click();
+    });
+
+    apply(initial);
+    filter.hidden = false;
+  }
+</script>
+
+<style>
+  .category-page {
+    max-width: 1000px;
+    margin: 0 auto;
+  }
+
+  .page-header {
+    margin-bottom: 2.5rem;
+  }
+
+  .page-header h1 {
+    font-family: var(--font-serif);
+    font-size: clamp(2rem, 5vw, 3rem);
+    font-weight: 600;
+    margin-bottom: 1rem;
+    letter-spacing: -0.02em;
+  }
+
+  .page-header p {
+    font-size: 1.125rem;
+    color: var(--text-secondary);
+    line-height: 1.7;
+    max-width: 700px;
+  }
+
+  .version-filter {
+    margin-bottom: 2rem;
+    padding: 1rem 1.25rem;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-subtle);
+    border-radius: 12px;
+  }
+
+  .version-filter[hidden] {
+    display: none;
+  }
+
+  .filter-label {
+    margin-bottom: 0.6rem;
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-muted);
+  }
+
+  .filter-options {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+  }
+
+  .filter-options button {
+    padding: 0.35rem 0.75rem;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    color: var(--text-secondary);
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+    cursor: pointer;
+    transition: border-color 0.2s ease, color 0.2s ease, background 0.2s ease;
+  }
+
+  .filter-options button:hover,
+  .filter-options button:focus-visible {
+    border-color: var(--accent-amber);
+    color: var(--text-primary);
+  }
+
+  .filter-options button[aria-checked='true'] {
+    background: color-mix(in srgb, var(--accent-amber) 18%, transparent);
+    border-color: var(--accent-amber);
+    color: var(--text-primary);
+  }
+
+  .filter-status {
+    margin-top: 0.75rem;
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+  }
+
+  .cards {
+    display: grid;
+    gap: 1.5rem;
+    grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
+  }
+
+  .card-slot[hidden] {
+    display: none;
+  }
+
+  .card-slot > :global(.card) {
+    height: 100%;
+  }
+
+  @media (max-width: 768px) {
+    .cards {
+      grid-template-columns: 1fr;
+    }
+  }
+</style>

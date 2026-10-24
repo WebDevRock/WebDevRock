@@ -1,0 +1,25 @@
+---
+layout: ../../layouts/ContentLayout.astro
+title: "Reversible Data Fix Script Builder"
+description: "Generate a SQL Server data fix script for an update or a delete, with a preview, backup table, verification, and a ready-made rollback or restore."
+tags: [sql-server, data-fix, operations, tool]
+updated: "2026-10-24"
+---
+
+import DataFixScript from '../../components/tools/DataFixScript.astro';
+
+Describe the change and get a script that follows [Designing a Reversible Data Fix in SQL Server](/patterns/sql-reversible-data-fix): preview, back up, apply, verify, and keep the way back ready. It handles updates and deletes. Everything runs in your browser; nothing is sent anywhere.
+
+<DataFixScript />
+
+## Notes
+
+- **JOIN mode** expects a table with the key columns and a `new_` column for each column being changed, for example `CustomerID` and `new_Email`. The [List to SQL Converter](/tools/list-to-sql) can build one from a pasted spreadsheet if you name the columns with the header option.
+- **Only changed rows are touched.** In JOIN mode the script skips rows that already hold the new value, including changes to or from `NULL`. See [Update Only When Values Change](/snippets/sql-update-only-when-changed).
+- **Repeated keys** in the source table make the result unpredictable, because SQL Server picks one of the matching rows. Remove them first.
+- **Filter mode** needs a `WHERE` clause. List every column the `SET` clause changes in "Columns being changed", or the rollback will not restore them.
+- **Batches** are for large changes. Each batch commits on its own, so the backup table is the way back. See [Changing Large Volumes of Production Data Without an Outage](/patterns/large-data-changes-without-outage).
+- **Deletes** back up whole rows, then delete exactly the rows in the backup, so everything deleted can be put back even if more rows start to match while you work. In JOIN mode the key table only needs the key columns, for example a `#rows_to_delete` table built with the [List to SQL Converter](/tools/list-to-sql). Repeated keys are fine for deletes.
+- **Check what references the table** before deleting. Step 2 lists the foreign keys that point at it: rows that depend on the deleted ones make the delete fail, or are deleted or set to `NULL` with them, and the restore doesn't bring those back. Delete triggers also run.
+- **Restoring deleted rows** takes two steps: 6a lists the columns to insert (leaving out computed and rowversion columns) and says whether the table has an identity column; paste the list into 6b. Restored rows keep their key values. Rows changed in the backup since the delete are not merged.
+- The backup table is named from the ticket and today's date, so the script and the backup can be matched up later.

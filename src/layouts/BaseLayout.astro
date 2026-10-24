@@ -1,0 +1,134 @@
+---
+import '../styles/global.css';
+import Search from '../components/Search.astro';
+
+interface Props {
+  title: string;
+  description?: string;
+  type?: 'website' | 'article';
+  updated?: string;
+  noindex?: boolean; // e.g. the 404 page: keep it out of search engines and give it no canonical URL
+}
+
+const {
+  title,
+  description = 'A personal engineering toolkit and knowledge base',
+  type = 'website',
+  updated,
+  noindex = false,
+} = Astro.props;
+
+const siteName = 'WebDevRock';
+const fullTitle = `${title} — ${siteName}`;
+
+// Same trailing-slash form as the sitemap and nginx's directory URLs
+const path = Astro.url.pathname.endsWith('/') ? Astro.url.pathname : `${Astro.url.pathname}/`;
+const canonical = new URL(path, Astro.site).href;
+const shareImage = new URL('/og-default.png', Astro.site).href;
+
+// Self-hosted Umami (see ops/umami/README.md); only emitted in production builds once configured.
+// data-exclude-hash: tool links carry the reader's input after the # (see src/lib/tool-links.ts), which must not be recorded.
+const umamiSrc = import.meta.env.PUBLIC_UMAMI_SRC;
+const umamiWebsiteId = import.meta.env.PUBLIC_UMAMI_WEBSITE_ID;
+const enableAnalytics = import.meta.env.PROD && umamiSrc && umamiWebsiteId;
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="description" content={description} />
+    <meta name="viewport" content="width=device-width" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="generator" content={Astro.generator} />
+    <title>{fullTitle}</title>
+    {noindex ? <meta name="robots" content="noindex" /> : <link rel="canonical" href={canonical} />}
+    <link rel="sitemap" href="/sitemap-index.xml" />
+    <link rel="alternate" type="application/rss+xml" title="WebDevRock" href="/rss.xml" />
+    <link rel="alternate" type="text/plain" title="LLM-readable site index" href="/llms.txt" />
+
+    <!-- Open Graph -->
+    <meta property="og:type" content={type} />
+    <meta property="og:site_name" content={siteName} />
+    <meta property="og:title" content={fullTitle} />
+    <meta property="og:description" content={description} />
+    {!noindex && <meta property="og:url" content={canonical} />}
+    <meta property="og:image" content={shareImage} />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="WebDevRock: practical patterns for real-world development" />
+    <meta property="og:locale" content="en_GB" />
+    {type === 'article' && updated && <meta property="article:modified_time" content={updated} />}
+
+    <!-- Twitter / X -->
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content={fullTitle} />
+    <meta name="twitter:description" content={description} />
+    <meta name="twitter:image" content={shareImage} />
+    <meta name="twitter:image:alt" content="WebDevRock: practical patterns for real-world development" />
+    {enableAnalytics && (
+      <script is:inline defer src={umamiSrc} data-website-id={umamiWebsiteId} data-domains="webdevrock.uk" data-exclude-hash="true"></script>
+    )}
+  </head>
+  <body>
+    <header>
+      <nav>
+        <a href="/" class="logo">
+          <div class="logo-mark">&lt;/&gt;</div>
+          <span class="logo-text">WebDevRock</span>
+        </a>
+        <div class="nav-links">
+          <a href="/patterns">Patterns</a>
+          <a href="/snippets">Snippets</a>
+          <a href="/tools">Tools</a>
+          <a href="/ai">AI &amp; LLMs</a>
+          <a href="/experiments">Experiments</a>
+        </div>
+        <div class="nav-search">
+          <Search />
+        </div>
+      </nav>
+    </header>
+    <main>
+      <slot />
+    </main>
+    <footer>
+      <p>
+        &copy; 2026 webdevrock.uk
+        <span aria-hidden="true">·</span>
+        <a href="/rss.xml" data-umami-event="rss-click" data-umami-event-target="footer">RSS feed</a>
+      </p>
+    </footer>
+  </body>
+</html>
+
+<style is:global>
+  .logo-mark {
+    width: 36px;
+    height: 36px;
+    background: var(--gradient-1);
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: var(--font-mono);
+    font-weight: 600;
+    font-size: 1.1rem;
+    color: var(--bg-deep);
+  }
+
+  footer a {
+    color: var(--text-secondary);
+    text-decoration: none;
+  }
+
+  footer a:hover {
+    color: var(--accent-amber);
+  }
+
+  .logo-text {
+    font-weight: 600;
+    font-size: 1.1rem;
+    letter-spacing: -0.02em;
+  }
+</style>

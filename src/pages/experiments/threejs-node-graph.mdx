@@ -1,0 +1,146 @@
+---
+layout: ../../layouts/ContentLayout.astro
+title: "Three.js: Animated Node Graph"
+description: "3D visualization of connected nodes with physics simulation. Work in progress."
+tags: [threejs, visualization, work-in-progress]
+updated: "2026-02-08"
+---
+
+import ThreeJsNodeGraph from '../../components/ThreeJsNodeGraph.astro';
+
+## Objective
+
+Visualize a network of connected nodes in 3D space with:
+- Nodes as spheres
+- Connections as lines
+- Simple physics (nodes repel, connections pull)
+- Camera controls for rotation and zoom
+
+## Current State
+
+Basic scene rendering with static nodes. Drag to rotate, scroll to zoom.
+
+## Demo
+
+<ThreeJsNodeGraph />
+
+## Code
+
+### Basic Setup
+
+```javascript
+import * as THREE from 'three';
+import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+
+// Scene setup
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(75, width / height, 0.1, 1000);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setClearColor(0x0a0a0a);
+
+// Camera controls
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.05;
+```
+
+### Create Nodes
+
+```javascript
+const nodeMaterial = new THREE.MeshBasicMaterial({ color: 0x4a9eff });
+const nodes = [];
+
+for (let i = 0; i < 12; i++) {
+  const geometry = new THREE.SphereGeometry(0.3, 16, 16);
+  const node = new THREE.Mesh(geometry, nodeMaterial);
+  
+  node.position.x = (Math.random() - 0.5) * 10;
+  node.position.y = (Math.random() - 0.5) * 10;
+  node.position.z = (Math.random() - 0.5) * 10;
+  
+  scene.add(node);
+  nodes.push(node);
+}
+```
+
+### Create Connections
+
+```javascript
+const lineMaterial = new THREE.LineBasicMaterial({ color: 0x2a2a2a });
+
+for (let i = 0; i < nodes.length; i++) {
+  for (let j = i + 1; j < nodes.length; j++) {
+    if (Math.random() > 0.7) {
+      const points = [nodes[i].position, nodes[j].position];
+      const geometry = new THREE.BufferGeometry().setFromPoints(points);
+      const line = new THREE.Line(geometry, lineMaterial);
+      scene.add(line);
+    }
+  }
+}
+```
+
+### Animation Loop
+
+```javascript
+function animate() {
+  requestAnimationFrame(animate);
+  controls.update();
+  renderer.render(scene, camera);
+}
+
+animate();
+```
+
+### Physics (Future Implementation)
+
+```javascript
+// Basic node structure
+class Node {
+  constructor(x, y, z) {
+    this.position = new THREE.Vector3(x, y, z);
+    this.velocity = new THREE.Vector3(0, 0, 0);
+    this.connections = [];
+  }
+  
+  applyForce(force) {
+    this.velocity.add(force);
+  }
+  
+  update() {
+    this.position.add(this.velocity);
+    this.velocity.multiplyScalar(0.95); // Damping
+  }
+}
+
+// Node repulsion
+function applyRepulsion(nodes) {
+  for (let i = 0; i < nodes.length; i++) {
+    for (let j = i + 1; j < nodes.length; j++) {
+      const direction = nodes[i].position.clone().sub(nodes[j].position);
+      const distance = direction.length();
+      
+      if (distance < 5) {
+        const force = direction.normalize().multiplyScalar(0.01 / distance);
+        nodes[i].applyForce(force);
+        nodes[j].applyForce(force.negate());
+      }
+    }
+  }
+}
+```
+
+## Next Steps
+
+- [ ] Implement node repulsion
+- [ ] Add connection spring forces
+- [ ] Mouse interaction (hover, drag nodes)
+- [ ] Load data from external source
+- [ ] Node labels on hover
+- [ ] Performance optimization for large graphs
+
+## Notes
+
+- Using Three.js r160+
+- OrbitControls for camera manipulation
+- May need WebGL2 for larger datasets

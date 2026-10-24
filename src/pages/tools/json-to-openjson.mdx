@@ -1,0 +1,24 @@
+---
+layout: ../../layouts/ContentLayout.astro
+title: "JSON to OPENJSON Generator"
+description: "Paste a sample JSON payload and get a SQL Server OPENJSON query with column types inferred from the data."
+tags: [sql-server, json, integrations, tool]
+updated: "2026-10-24"
+---
+
+import JsonToOpenJson from '../../components/tools/JsonToOpenJson.astro';
+
+Paste an API response, webhook body, or export file and get an `OPENJSON ... WITH (...)` query that turns it into rows. Everything runs in your browser; nothing is sent anywhere.
+
+<JsonToOpenJson />
+
+## Notes
+
+- **Rows:** if the JSON is wrapped, such as `{ "data": [ ... ] }`, the first array of objects is used. Set the path yourself (for example `$.result.items`) to choose a different one.
+- **Types are a starting point:** they come from the sample only. A column that held small numbers in the sample may hold larger ones in production, so check sizes before relying on them.
+- **Dates:** ISO 8601 strings become `DATE`, `DATETIME2`, or `DATETIMEOFFSET` (when they include `Z` or an offset).
+- **Nested data:** objects are flattened into `parent_child` columns. Arrays are returned `AS JSON` so you can pass them to a second `OPENJSON` call with `CROSS APPLY`.
+- **Case matters:** JSON property names in the paths are case-sensitive. A path that does not match returns `NULL` rather than an error.
+- `OPENJSON` needs SQL Server 2016+ with database compatibility level 130 or higher.
+
+For loading the result into a staging table and validating it before it reaches anything downstream, see [Designing Integration Pipelines That Fail Safely](/patterns/integration-pipelines-fail-safely). For passing lists into queries, see [Pass a List of IDs Without Dynamic SQL](/snippets/sql-pass-id-list).

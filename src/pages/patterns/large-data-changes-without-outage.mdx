@@ -1,0 +1,193 @@
+---
+layout: ../../layouts/ContentLayout.astro
+title: "Changing Large Volumes of Production Data Without an Outage"
+description: "Planning backfills and clean-ups that touch millions of rows while the system stays live."
+tags: ['sql-server', 'data-fix', 'operations', 'performance']
+updated: "2026-10-24"
+---
+
+## Problem
+
+A change that is trivial on a hundred rows becomes an incident at ten million. A single large `UPDATE` or `DELETE` blocks users, fills the <span class="jargon" data-tooltip="The file where SQL Server records every change so it can be rolled back or recovered">transaction log</span>, and if it fails, rolls back for as long as it ran.
+
+## Context
+
+Live systems where a maintenance window is short or unavailable: backfilling a new column, archiving old records, correcting a mapping applied to years of history, or removing data after an integration fault.
+
+The same constraints as a [reversible data fix](/patterns/sql-reversible-data-fix) apply, with additional pressure from scale:
+
+- tables shared with users and scheduled jobs that keep running
+- limited disk headroom for log growth
+- replicas, <span class="jargon" data-tooltip="Features such as Availability Groups or Change Data Capture that copy changes to other servers or consumers">replication or change capture</span> that must process every changed row
+- no realistic option to restore a backup if something goes wrong
+
+## Solution
+
+Treat the change as an operation with a plan, a controlled run, and a defined finish, rather than a statement that is executed and waited on.
+
+### 1. Measure before planning
+
+Find out how many rows are in scope, how large the table is, and what else fires when rows change.
+
+```sql
+SELECT COUNT(*) AS rows_in_scope
+FROM target_table
+WHERE created_at < '2024-01-01';
+
+EXEC sp_spaceused 'target_table';
+
+-- Triggers that will run for every changed row
+SELECT name, is_disabled
+FROM sys.triggers
+WHERE parent_id = OBJECT_ID('target_table');
+```
+
+Also check for foreign keys with cascading deletes, indexed views, and whether the columns in the `WHERE` clause are indexed. Each of these multiplies the cost per row.
+
+### 2. Capture what will change
+
+Keep a copy of the affected rows, or the before values of the changed columns, so the change can be reversed. [Record Changed Rows with OUTPUT INTO](/snippets/sql-output-into-audit) does this inside each batch.
+
+For very large deletes, the copy is often an archive table rather than a temporary backup, and should be planned as such.
+
+### 3. Process in small batches
+
+Change a few thousand rows at a time, commit, pause briefly, and repeat. Each batch holds locks for milliseconds rather than minutes, and the log can be reused between batches.
+
+[Update or Delete Millions of Rows in Batches](/snippets/sql-batch-update-delete) shows the basic loop.
+
+### 4. Make the run resumable
+
+The job will be stopped at some point, by choice or by failure. Design it so stopping leaves the data consistent and restarting continues from where it left off.
+
+There are two common approaches:
+
+- **Filter on the result.** The `WHERE` clause excludes rows already changed, so each rerun only finds what is left. Simple, but relies on a cheap way to identify unchanged rows.
+- **Walk the key range.** Process fixed ranges of the clustered key and record the last range completed.
+
+```sql
+DECLARE @from_id INT = 0;  -- set to the last completed id to resume
+DECLARE @batch_size INT = 4000;
+DECLARE @max_id INT = (SELECT MAX(id) FROM target_table);
+
+WHILE @from_id < @max_id
+BEGIN
+  UPDATE t
+  SET t.region_code = r.region_code
+  FROM target_table t
+  JOIN region_lookup r ON r.postcode_area = t.postcode_area
+  WHERE t.id > @from_id
+    AND t.id <= @from_id + @batch_size;
+
+  SET @from_id += @batch_size;
+  RAISERROR('Processed up to id %d', 0, 1, @from_id) WITH NOWAIT;
+
+  WAITFOR DELAY '00:00:01';
+END;
+```
+
+Key ranges give every batch a predictable cost because each one is an index seek, even when most rows have already been processed.
+
+### 5. Watch the system while it runs
+
+Agree <span class="jargon" data-tooltip="Conditions decided in advance that mean the job is paused immediately, without debate">stop conditions</span> before starting, and monitor them throughout:
+
+```sql
+-- Sessions currently blocked, and by whom
+SELECT session_id, blocking_session_id, wait_type, wait_time, command
+FROM sys.dm_exec_requests
+WHERE blocking_session_id <> 0;
+
+-- How full the transaction log is
+SELECT used_log_space_in_percent
+FROM sys.dm_db_log_space_usage;
+```
+
+Typical stop conditions include:
+
+- any session blocked for more than a few seconds
+- log usage above an agreed threshold
+- replica or change capture latency growing
+- application response times degrading
+
+Decisions made in advance are better than decisions made during an incident.
+
+### 6. Choose the time and tell people
+
+Run during the quietest period, away from backups, index maintenance, and scheduled ETL. Make sure the operations team knows the job is running, what it affects, and how to stop it.
+
+## Trade-offs
+
+Batching is slower in elapsed time. A change that would take ten minutes as one statement may take several hours in batches.
+
+The change is also no longer atomic. While it runs, some rows have the new values and some have the old ones. If readers cannot tolerate a mixed state, a different approach is needed, such as writing to a new column and switching over once complete, or using a maintenance window.
+
+Batch size and pause length need tuning. Smaller batches are gentler but slower, and the right values depend on the table and the workload.
+
+## Checks
+
+After the run completes:
+
+- confirm the in-scope query now returns zero rows
+- compare total rows changed with the original count
+- confirm log usage has returned to normal levels
+- check for lingering blocking or long-running sessions
+- verify downstream consumers, such as reports, integrations, and change feeds, handled the volume
+- schedule removal of temporary backup tables
+
+If the job was stopped part-way, confirm the data is consistent before deciding whether to resume.
+
+## Notes
+
+At scale, the risk is rarely that the SQL is wrong. It is the operational impact of running correct SQL against a live system.
+
+Most of the work is in the plan: measuring, choosing a batch strategy, and agreeing when to stop. The change itself is usually the simplest part.
+
+<style is:global>{`
+  .jargon {
+    position: relative;
+    text-decoration: underline;
+    text-decoration-style: dotted;
+    text-decoration-color: var(--accent, #0ea5e9);
+    text-decoration-thickness: 2px;
+    text-underline-offset: 3px;
+    cursor: help;
+  }
+
+  .jargon::after {
+    content: attr(data-tooltip);
+    position: absolute;
+    bottom: 100%;
+    left: 50%;
+    transform: translateX(-50%) translateY(-8px);
+    padding: 0.625rem 0.875rem;
+    background: var(--surface-elevated, #2a2a2a);
+    color: var(--text-primary, #fff);
+    border: 1px solid var(--border, #444);
+    border-radius: 0.375rem;
+    font-size: 0.875rem;
+    line-height: 1.5;
+    white-space: normal;
+    max-width: 400px;
+    min-width: 200px;
+    width: max-content;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.2s ease;
+    z-index: 1000;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  }
+
+  .jargon:hover::after {
+    opacity: 1;
+  }
+
+  @media (max-width: 768px) {
+    .jargon::after {
+      left: 0;
+      transform: translateX(0) translateY(-8px);
+      max-width: 280px;
+      min-width: 180px;
+    }
+  }
+`}</style>

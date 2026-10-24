@@ -1,0 +1,172 @@
+---
+layout: ../../layouts/ContentLayout.astro
+title: "Retry, Back Off, Give Up: Handling Unreliable External APIs"
+description: "A system-level policy for which failures to retry, how long to keep trying, and what happens when retries run out."
+tags: ['integrations', 'pipelines', 'resilience', 'operations']
+updated: "2026-10-24"
+---
+
+## Problem
+
+Retry logic is usually added one call at a time, after something fails in production. The result is inconsistent: some calls give up on the first timeout, others retry indefinitely and hammer an API that is already struggling. When retries finally run out, the item is often lost or left stuck with no one aware of it.
+
+## Context
+
+Integration pipelines that post to third-party APIs with <span class="jargon" data-tooltip="Limits on how many requests a client may send in a period, usually signalled with HTTP 429">rate limits</span>, maintenance windows, and occasional outages. Each run processes many items, and the people responsible for the data are not the people who wrote the integration.
+
+## Solution
+
+Define one retry policy for the integration that answers four questions:
+
+- which failures are worth retrying
+- how long to wait between attempts
+- when to stop trying
+- where an item goes when it is given up on
+
+### 1. Classify failures before retrying
+
+Not every failure should be retried. Retrying a request that can never succeed wastes time and hides the real problem.
+
+- **Transient:** timeouts, connection resets, `429 Too Many Requests`, `502`, `503`, `504`. Retry with backoff.
+- **Permanent:** `400 Bad Request`, `401`, `403`, `404`, `422` validation errors. Do not retry. The data or configuration needs fixing first.
+- **Unknown outcome:** a timeout on a request that creates something. The destination may have processed it. Check before retrying, as described in [Designing Integration Jobs That Are Safe to Rerun](/patterns/integration-jobs-safe-to-rerun).
+
+### 2. Retry at two levels
+
+Short failures and long outages need different handling.
+
+**Within a request**, retry a few times over a few seconds, with exponential backoff and jitter. This absorbs brief network problems and momentary overload. See [Retry fetch with Exponential Backoff and Jitter](/snippets/ts-fetch-retry-backoff).
+
+**Across runs**, leave the item queued with an attempt count and a time for the next attempt. This rides out outages lasting minutes or hours without holding a process open.
+
+```sql
+-- Items due for another attempt
+SELECT TOP (100) id, attempt_count
+FROM posting_queue
+WHERE status = 'Queued'
+  AND next_attempt_at <= SYSUTCDATETIME()
+ORDER BY next_attempt_at;
+
+-- After a transient failure: wait 5, 10, 20... minutes, capped at 6 hours
+UPDATE posting_queue
+SET attempt_count = attempt_count + 1,
+    next_attempt_at = DATEADD(MINUTE,
+      CASE WHEN attempt_count >= 7 THEN 360 ELSE 5 * POWER(2, attempt_count) END,
+      SYSUTCDATETIME()),
+    last_error = @error
+WHERE id = @id;
+```
+
+### 3. Set a retry budget
+
+Limit retries per item and per run.
+
+- **Per item:** a maximum number of attempts, or a maximum age such as 24 hours. Some data is only useful for a limited time, and late delivery can be worse than none.
+- **Per run:** if a large share of items fail with transient errors, stop the run. The API is down, and continuing only burns through every item's retry budget at once.
+
+Always respect a `Retry-After` header when the API sends one.
+
+### 4. Stop calling an API that is failing
+
+A <span class="jargon" data-tooltip="A switch that stops calls to a failing service for a period, then lets a single test call through to see if it has recovered">circuit breaker</span> pauses all calls after several consecutive failures, waits, and then allows a single test request. If it succeeds, normal processing resumes.
+
+A simple version is often enough: abort the run if the first ten items all fail with transient errors, and let the next scheduled run try again.
+
+### 5. Send exhausted items somewhere visible
+
+When an item runs out of retries, move it to a state that a person will see, with the information needed to act on it:
+
+- the last error message and status code
+- the number of attempts and when they were made
+- the payload that was sent
+
+```sql
+UPDATE posting_queue
+SET status = 'NeedsAttention'
+WHERE status = 'Queued'
+  AND (attempt_count >= 10
+       OR first_attempt_at < DATEADD(HOUR, -24, SYSUTCDATETIME()));
+```
+
+Operations users should be able to fix the cause and requeue the item. Items should never be dropped silently. This is the same principle as [Why Status Tables Fail Operations Teams](/patterns/status-tables-fail-operations): show what needs attention, not only what failed.
+
+### 6. Alert on patterns, not individual failures
+
+A single transient failure is expected and should not wake anyone up. Alert when:
+
+- the number of items needing attention is growing
+- the oldest queued item is older than an agreed threshold
+- the success rate for a run drops sharply
+
+## Trade-offs
+
+Retrying across runs means data arrives late rather than failing loudly. Users need to know that a queued item is waiting, not lost.
+
+The policy adds queue tables, states, and scheduling logic that a direct call does not need.
+
+A circuit breaker can pause processing during a partial outage when some requests would have succeeded. Tuning thresholds is a balance between protecting the API and keeping data moving.
+
+## Checks
+
+After implementing or changing the policy:
+
+- simulate a few minutes of `503` responses and confirm items recover without intervention
+- send a request that returns `400` and confirm it goes straight to review with no retries
+- simulate an hour-long outage and confirm the run stops early and items resume later
+- confirm retried creates do not produce duplicates in the destination
+- confirm operations users can see, fix, and requeue items that need attention
+
+## Notes
+
+Retrying is easy to add. Deciding when to stop is the actual design work.
+
+The last retry should hand the problem to a person, with enough context to fix it. A policy that ends anywhere else eventually loses data.
+
+<style is:global>{`
+  .jargon {
+    position: relative;
+    text-decoration: underline;
+    text-decoration-style: dotted;
+    text-decoration-color: var(--accent, #0ea5e9);
+    text-decoration-thickness: 2px;
+    text-underline-offset: 3px;
+    cursor: help;
+  }
+
+  .jargon::after {
+    content: attr(data-tooltip);
+    position: absolute;
+    bottom: 100%;
+    left: 50%;
+    transform: translateX(-50%) translateY(-8px);
+    padding: 0.625rem 0.875rem;
+    background: var(--surface-elevated, #2a2a2a);
+    color: var(--text-primary, #fff);
+    border: 1px solid var(--border, #444);
+    border-radius: 0.375rem;
+    font-size: 0.875rem;
+    line-height: 1.5;
+    white-space: normal;
+    max-width: 400px;
+    min-width: 200px;
+    width: max-content;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.2s ease;
+    z-index: 1000;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  }
+
+  .jargon:hover::after {
+    opacity: 1;
+  }
+
+  @media (max-width: 768px) {
+    .jargon::after {
+      left: 0;
+      transform: translateX(0) translateY(-8px);
+      max-width: 280px;
+      min-width: 180px;
+    }
+  }
+`}</style>

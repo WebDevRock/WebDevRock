@@ -1,0 +1,233 @@
+---
+// "Your values" panel for snippets. The snippet's front matter lists the stand-in names in its code:
+//
+//   placeholders:
+//     - token: target_table
+//       label: Table
+//       hint: e.g. dbo.Orders
+//
+// Quote tokens that YAML would read as something else ("2024-01-01", "4000").
+// Only shown with JavaScript; the code keeps its defaults otherwise, and in the .md copies.
+import type { Placeholder } from '../scripts/placeholders';
+
+interface Props {
+  placeholders: Placeholder[];
+}
+
+const placeholders = Astro.props.placeholders.map((p) => ({ ...p, token: String(p.token) }));
+---
+
+<section class="placeholder-panel" aria-labelledby="placeholder-title" data-placeholder-panel data-placeholders={JSON.stringify(placeholders)} hidden data-pagefind-ignore>
+  <div class="panel-header">
+    <p id="placeholder-title" class="panel-title"><span aria-hidden="true">✎</span> Your values</p>
+    <p class="panel-intro">Type your own names and every code block on this page updates, including what Copy copies.</p>
+  </div>
+  <div class="fields">
+    {placeholders.map((p) => (
+      <label class="field">
+        <span class="field-label">{p.label}</span>
+        <input type="text" data-token={p.token} placeholder={p.token} spellcheck="false" autocomplete="off" autocapitalize="off" />
+        {p.hint && <span class="field-hint">{p.hint}</span>}
+      </label>
+    ))}
+  </div>
+  <div class="panel-footer">
+    <p class="panel-status" role="status" data-placeholder-status></p>
+    <button type="button" class="reset" data-placeholder-reset>Reset to defaults</button>
+  </div>
+</section>
+
+<script>
+  import { trackEvent } from '../scripts/analytics';
+  import { hasCustomValues, markTokens, renderValues, setPlaceholders, setValue, type Placeholder } from '../scripts/placeholders';
+
+  const panel = document.querySelector<HTMLElement>('[data-placeholder-panel]');
+  const content = document.querySelector<HTMLElement>('.content');
+
+  if (panel && content) {
+    const placeholders: Placeholder[] = JSON.parse(panel.dataset.placeholders ?? '[]');
+    const inputs = [...panel.querySelectorAll<HTMLInputElement>('input[data-token]')];
+    const status = panel.querySelector<HTMLElement>('[data-placeholder-status]')!;
+    const storageKey = `placeholders:${location.pathname}`;
+    const tracked = new Set<string>();
+
+    setPlaceholders(placeholders);
+    markTokens(content);
+
+    // Sit just above the first code block rather than above the problem description
+    const firstCode = content.querySelector('pre');
+    const anchor = firstCode?.closest('.content > *');
+    if (anchor) anchor.before(panel);
+
+    const save = () => {
+      try {
+        const saved = Object.fromEntries(inputs.filter((i) => i.value.trim()).map((i) => [i.dataset.token!, i.value.trim()]));
+        if (Object.keys(saved).length) localStorage.setItem(storageKey, JSON.stringify(saved));
+        else localStorage.removeItem(storageKey);
+      } catch {
+        // Blocked storage: values just aren't remembered
+      }
+    };
+
+    const update = () => {
+      inputs.forEach((input) => setValue(input.dataset.token!, input.value));
+      renderValues(content);
+      const count = inputs.filter((i) => i.value.trim()).length;
+      status.textContent = hasCustomValues() ? `Using your values for ${count} of ${inputs.length}.` : '';
+    };
+
+    // Values from an earlier visit to this page
+    try {
+      const saved = JSON.parse(localStorage.getItem(storageKey) ?? '{}') as Record<string, string>;
+      inputs.forEach((input) => (input.value = saved[input.dataset.token!] ?? ''));
+    } catch {
+      // Nothing saved, or storage blocked
+    }
+
+    panel.addEventListener('input', (event) => {
+      const input = event.target as HTMLInputElement;
+      const token = input.dataset.token;
+      if (!token) return;
+      update();
+      save();
+      if (!tracked.has(token) && input.value.trim()) {
+        tracked.add(token);
+        trackEvent('snippet-customise', { page: location.pathname, placeholder: token });
+      }
+    });
+
+    panel.querySelector('[data-placeholder-reset]')?.addEventListener('click', () => {
+      inputs.forEach((input) => (input.value = ''));
+      update();
+      save();
+      inputs[0]?.focus();
+    });
+
+    update();
+    panel.hidden = false;
+  }
+</script>
+
+<style>
+  .placeholder-panel {
+    margin: 1.5rem 0;
+    padding: 1.25rem 1.5rem;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-subtle);
+    border-left: 3px solid var(--accent-amber);
+    border-radius: 10px;
+  }
+
+  .placeholder-panel[hidden] {
+    display: none;
+  }
+
+  .panel-header {
+    margin-bottom: 1rem;
+  }
+
+  .panel-title {
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--accent-amber);
+  }
+
+  .panel-intro {
+    margin-top: 0.25rem;
+    color: var(--text-secondary);
+    font-size: 0.9rem;
+  }
+
+  .fields {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    gap: 0.75rem 1rem;
+  }
+
+  .field {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    min-width: 0;
+  }
+
+  .field-label {
+    font-size: 0.8rem;
+    font-weight: 500;
+    color: var(--text-secondary);
+  }
+
+  .field input {
+    width: 100%;
+    padding: 0.45rem 0.6rem;
+    background: var(--bg-deep);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+    font-size: 0.85rem;
+  }
+
+  .field input::placeholder {
+    color: var(--text-muted);
+  }
+
+  .field input:focus {
+    outline: none;
+    border-color: var(--accent-amber);
+  }
+
+  .field-hint {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+  }
+
+  .panel-footer {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    align-items: center;
+    gap: 0.5rem 1rem;
+    margin-top: 1rem;
+  }
+
+  .panel-status {
+    font-size: 0.8rem;
+    color: var(--accent-amber);
+  }
+
+  .reset {
+    margin-left: auto;
+    padding: 0.3rem 0.7rem;
+    background: none;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text-secondary);
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    cursor: pointer;
+  }
+
+  .reset:hover,
+  .reset:focus-visible {
+    border-color: var(--accent-amber);
+    color: var(--text-primary);
+  }
+</style>
+
+<style is:global>
+  /* Placeholder names inside code: underlined so readers can see what the panel changes */
+  .content code .ph {
+    text-decoration: underline dotted color-mix(in srgb, var(--accent-amber) 70%, transparent);
+    text-underline-offset: 3px;
+  }
+
+  .content code .ph.ph-custom {
+    background: color-mix(in srgb, var(--accent-amber) 18%, transparent);
+    border-radius: 2px;
+    text-decoration: none;
+  }
+</style>

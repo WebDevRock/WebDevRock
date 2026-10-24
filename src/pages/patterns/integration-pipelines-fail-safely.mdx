@@ -1,0 +1,202 @@
+---
+layout: ../../layouts/ContentLayout.astro
+title: "Designing Integration Pipelines That Fail Safely"
+description: "A practical approach to building integration pipelines that prevent bad data from reaching downstream systems."
+tags: ['integrations', 'pipelines', 'validation', 'operations']
+updated: "2026-02-12"
+---
+
+## Problem
+
+Integration pipelines often fail unpredictably, and partial failures can create duplicates, data corruption, or difficult <span class="jargon" data-tooltip="Process of identifying and resolving data discrepancies between systems">reconciliation</span> work.
+
+## Context
+
+Operational systems integrating with third-party platforms where data quality varies, failures are inevitable, and reversing incorrect transactions is expensive.
+
+## Solution
+
+Integration pipelines should assume that failure will occur. The goal is not to prevent failure entirely, but to ensure failures are contained, visible, and recoverable.
+
+A reliable pipeline separates processing into clearly defined stages, where each stage has a single responsibility and can stop processing safely if <span class="jargon" data-tooltip="Process of checking data meets required rules and constraints">validation</span> fails.
+
+A typical structure looks like this:
+
+<ol class="stage-list">
+  <li>Export detected</li>
+  <li>Export retrieved</li>
+  <li>Parsed</li>
+  <li>Validated</li>
+  <li>Matched</li>
+  <li>Queued for posting</li>
+  <li>Posted to destination system</li>
+</ol>
+
+Each stage exists to prevent incorrect data from progressing further <span class="jargon" data-tooltip="Systems or processes that receive and depend on data from this integration">downstream</span>.
+
+### 1. Export detected
+
+The system identifies that new data is available but does not process it immediately.
+
+This stage should only confirm availability. Avoid performing transformations or validation here. Separating detection from processing allows retries without duplicating work. [Designing Integration Jobs That Are Safe to Rerun](/patterns/integration-jobs-safe-to-rerun) covers how to keep every stage safe to repeat.
+
+### 2. Export retrieved
+
+The data is downloaded or pulled into a controlled environment.
+
+At this stage the goal is to preserve the original <span class="jargon" data-tooltip="The raw data structure received from an external system or API">payload</span> exactly as received. Storing the raw input allows later investigation if discrepancies appear.
+
+### 3. Parsed
+
+The file or payload is read and converted into a structured format.
+
+<span class="jargon" data-tooltip="Converting raw text or data into structured objects the system can work with">Parsing</span> failures should stop processing immediately. Attempting to continue with partially parsed data introduces unpredictable behaviour later in the pipeline.
+
+### 4. Validated
+
+Validation occurs before any attempt is made to post data downstream.
+
+Typical validation includes:
+
+- required fields present
+- numeric totals matching expectations
+- date ranges valid
+- duplicate detection
+- business rule checks
+
+Validation failures should move items into a review state rather than attempting automatic correction.
+
+Duplicate detection catches duplicates as they arrive. [Stopping Duplicates at the Source Instead of Cleaning Them Up](/patterns/stop-duplicates-at-source) covers preventing them from being created.
+
+### 5. Matched
+
+Entities are resolved against internal records.
+
+Examples include:
+
+- vendor matching
+- personnel mapping
+- account or cost centre resolution
+- approver identification
+
+Matching should not modify source data. Instead, it should produce a mapping layer that can be reviewed independently.
+
+### 6. Queued for posting
+
+Only fully validated and matched records are allowed to enter the <span class="jargon" data-tooltip="Temporary holding area for items ready to be sent to external systems">posting queue</span>.
+
+This separation ensures that posting failures do not require re-running earlier stages.
+
+### 7. Posted to destination system
+
+The final stage performs the external <span class="jargon" data-tooltip="Application Programming Interface - how systems communicate with each other">API</span> or database operation.
+
+Success and failure responses must be recorded explicitly. <span class="jargon" data-tooltip="Errors that occur without logging or notification, making them hard to detect">Silent failures</span> create the most difficult reconciliation problems.
+
+For which posting failures to retry, how long to keep trying, and where items go when retries run out, see [Retry, Back Off, Give Up: Handling Unreliable External APIs](/patterns/handling-unreliable-external-apis) and the [fetch retry snippet](/snippets/ts-fetch-retry-backoff).
+
+## Trade-offs
+
+Breaking a pipeline into multiple stages increases implementation complexity and storage requirements. It may also introduce additional tables or status tracking.
+
+However, a single-stage pipeline tends to fail in ways that are difficult to diagnose. When parsing, validation, and posting occur together, it becomes unclear which assumption failed.
+
+The staged approach trades simplicity for <span class="jargon" data-tooltip="The ability to see what's happening inside a system through logs, metrics, and status">observability</span> and recovery.
+
+## Checks
+
+After implementing or modifying a pipeline:
+
+- confirm that failures stop progression to later stages
+- verify that retries do not create <span class="jargon" data-tooltip="Multiple copies of the same record created unintentionally">duplicate records</span>
+- ensure raw input data can be inspected after processing
+- confirm that operational users can see where items are stuck
+- test failure scenarios intentionally, not only success paths
+
+Pipelines that are only tested with valid data tend to fail unpredictably in production.
+
+## Notes
+
+Most integration failures are not technical errors but data assumptions that prove incorrect over time. Systems evolve independently, and validation rules that were once sufficient become incomplete.
+
+Designing for safe failure means accepting that incorrect data will arrive and ensuring the system responds predictably when it does.
+
+A pipeline that fails early and visibly is usually more reliable than one that attempts to recover automatically.
+
+<style is:global>{`
+  .jargon {
+    position: relative;
+    text-decoration: underline;
+    text-decoration-style: dotted;
+    text-decoration-color: var(--accent, #0ea5e9);
+    text-decoration-thickness: 2px;
+    text-underline-offset: 3px;
+    cursor: help;
+  }
+
+  .jargon::after {
+    content: attr(data-tooltip);
+    position: absolute;
+    bottom: 100%;
+    left: 50%;
+    transform: translateX(-50%) translateY(-8px);
+    padding: 0.625rem 0.875rem;
+    background: var(--surface-elevated, #2a2a2a);
+    color: var(--text-primary, #fff);
+    border: 1px solid var(--border, #444);
+    border-radius: 0.375rem;
+    font-size: 0.875rem;
+    line-height: 1.5;
+    white-space: normal;
+    max-width: 400px;
+    min-width: 200px;
+    width: max-content;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.2s ease;
+    z-index: 1000;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  }
+
+  .jargon:hover::after {
+    opacity: 1;
+  }
+
+  @media (max-width: 768px) {
+    .jargon::after {
+      left: 0;
+      transform: translateX(0) translateY(-8px);
+      max-width: 280px;
+      min-width: 180px;
+    }
+  }
+
+  .stage-list {
+    list-style: none;
+    padding-left: 0;
+    counter-reset: stage-counter;
+  }
+
+  .stage-list li {
+    counter-increment: stage-counter;
+    padding-left: 2.5rem;
+    position: relative;
+    margin-bottom: 0.5rem;
+  }
+
+  .stage-list li::before {
+    content: counter(stage-counter);
+    position: absolute;
+    left: 0;
+    width: 1.75rem;
+    height: 1.75rem;
+    background: var(--accent, #0ea5e9);
+    color: var(--background, #000);
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 600;
+    font-size: 0.875rem;
+  }
+`}</style>

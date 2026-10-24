@@ -1,0 +1,24 @@
+{
+  "name": "webdevrock",
+  "type": "module",
+  "version": "0.0.1",
+  "scripts": {
+    "dev": "astro dev",
+    "start": "astro dev",
+    "build": "astro build && pagefind --site dist",
+    "preview": "astro preview",
+    "astro": "astro",
+    "deploy": "npm run build && powershell -ExecutionPolicy Bypass -File .\\deploy.ps1"
+  },
+  "dependencies": {
+    "@astrojs/mdx": "^2.1.0",
+    "@astrojs/rss": "^4.0.19",
+    "@astrojs/sitemap": "~3.2.1",
+    "astro": "^4.3.0",
+    "three": "^0.182.0"
+  },
+  "devDependencies": {
+    "pagefind": "1.5.2",
+    "sass": "^1.70.0"
+  }
+}

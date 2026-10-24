@@ -1,0 +1,196 @@
+---
+layout: ../../layouts/ContentLayout.astro
+title: "LLM Productivity Workflows"
+description: "How I actually use LLMs day to day: email triage, content drafting, research synthesis, and decision support. Real patterns, not theoretical possibilities."
+tags: [llm, productivity, workflow, automation, intermediate]
+level: beginner
+updated: "2026-06-21"
+---
+
+## What This Covers
+
+Daily workflows where LLMs save time or improve quality. Not automation for its own sake. Patterns that solve real problems I encounter regularly.
+
+## 1. Email and Message Triage
+
+**The problem**: 50+ emails and messages daily. Most don't need my attention. Finding the three that do takes mental effort.
+
+**The workflow**:
+
+```
+1. Agent ingests unread messages via IMAP or API
+2. Classifies each: action needed / informational / low priority
+3. Summarises the ones requiring action with context
+4. Delivers a brief: "3 things to handle today" with reasoning
+5. You handle them. Nothing automated beyond filtering and summarising.
+```
+
+**Why this works**: The cost is reading a summary instead of scanning inboxes. The benefit is not missing something important because it arrived while you were focused on something else.
+
+**Implementation**: Himalaya CLI provides IMAP access in a scriptable form. Feed the output to an LLM prompt asking for classification and summary. Run twice daily via cron.
+
+**Important**: The agent does not reply to emails. It flags and summarises. Replying is where tone and relationship context matter, and LLMs get that wrong often enough that the risk isn't worth it.
+
+## 2. Content Drafting with Voice Calibration
+
+**The problem**: Maintaining a consistent voice across platforms (X, LinkedIn, blog) while writing frequently.
+
+**The workflow**:
+
+```
+1. Agent maintains a voice profile: what you sound like, what you've 
+   approved before, what you've rejected
+2. You provide the raw material: what happened, what you learned, 
+   what you're building
+3. Agent drafts in your voice, not generic marketing speak
+4. You review, tweak, approve or reject
+5. Approved drafts go to a queue; rejected ones train the voice profile
+```
+
+**Why this works**: The agent doesn't write from nothing. It shapes your raw thoughts into posts. The interview step (extracting the real story) matters more than the drafting. A draft built on thin air sounds exactly like that.
+
+**Voice calibration tips**:
+- Log every rejection with a reason. The agent learns faster from what you hate than what you tolerate
+- Start with past content you've actually written. Analyse patterns in sentence length, opener style, and vocabulary
+- Update the voice profile when you notice the agent drifting. Don't let bad patterns compound
+
+## 3. Research and Synthesis
+
+**The problem**: Keeping up with developments in your field without drowning in information.
+
+**The workflow**:
+
+```
+1. Agent monitors sources on schedule (HN API, RSS feeds, specific accounts)
+2. Ranks items by relevance to your domain and experience
+3. For each high-relevance item, provides:
+   - One-sentence summary
+   - Why it matters to you specifically
+   - Suggested angle if you want to write about it
+4. Delivers a digest. You decide whether to read the source, ignore it, 
+   or draft a reaction.
+```
+
+**Why this works**: Full reading is a commitment. A ranked digest with personalised relevance scores lets you decide where to spend that commitment.
+
+**Critical filter**: Niche relevance is not enough. The agent should only surface items where you have hands-on experience with the specific thing being discussed. An opinion on a tool you've never used is hollow content.
+
+## 4. Decision Support
+
+**The problem**: Complex decisions with multiple factors where your intuition might miss something or overweight recent information.
+
+**The workflow**:
+
+```
+1. Write the decision context: what you're choosing between, constraints, 
+   timeline, what you know
+2. Agent structures the analysis:
+   - List factors you've identified
+   - Suggest factors you might have missed
+   - Estimate impact and confidence for each
+   - Flag assumptions that might be wrong
+3. You review. The agent doesn't decide. It organises thinking.
+```
+
+**Why this works**: Structured analysis beats intuitive weighing for decisions you don't make often (hiring, architecture choices, major purchases). For decisions you make frequently, trust your gut. It's faster and usually as good.
+
+**Prompt template**:
+
+```
+I'm deciding between [Option A] and [Option B].
+Context: [relevant background]
+Constraints: [what limits the choice]
+Timeline: [when I need to decide]
+
+Analyse this decision. List factors I should consider, estimate 
+importance, flag any assumptions I might be wrong about, and suggest 
+what additional information would help. Do not recommend a choice. 
+just structure the analysis.
+```
+
+## 5. Code Review and Documentation
+
+**The problem**: Writing good code is only half the job. Explaining it, documenting edge cases, and catching mistakes before review takes significant time.
+
+**The workflow**:
+
+```
+1. Agent reads the code diff or file
+2. Checks against project conventions and common mistakes
+3. Suggests documentation for non-obvious logic
+4. Flags potential issues: error handling gaps, missing validation, 
+   performance concerns
+5. You review suggestions, accept or reject each
+```
+
+**Why this works**: Second pair of eyes, available instantly. It catches the obvious stuff (unused imports, missing null checks) so human review focuses on architecture and logic.
+
+**Limitations**: It won't understand business context or why a specific approach was chosen over alternatives. Use it for surface-level review, not design decisions.
+
+## 6. Meeting Notes and Action Extraction
+
+**The problem**: Meetings produce information that gets lost. Decisions, action items, and context fade quickly.
+
+**The workflow**:
+
+```
+1. Record or transcript the meeting
+2. Agent extracts:
+   - Decisions made
+   - Action items with owners and deadlines
+   - Open questions that need follow-up
+   - Context that will matter later but won't be obvious from notes
+3. Writes structured notes
+4. Adds action items to your task system
+```
+
+**Why this works**: The agent is better at structured extraction than you are in the moment. You focus on the conversation; it handles the documentation.
+
+**Privacy note**: Transcribing meetings with third-party services sends audio off-device. For sensitive meetings, use local transcription (Whisper runs locally) or take manual notes and have the agent structure them.
+
+## 7. Learning and Explaining
+
+**The problem**: New concepts in your field require time to understand. Explaining them to others requires understanding them first.
+
+**The workflow**:
+
+```
+1. Paste documentation, paper, or code you don't fully understand
+2. Agent explains in your terms, checks your understanding
+3. You ask follow-up questions until it clicks
+4. When you need to explain to someone else, agent helps structure 
+   the explanation for their level
+```
+
+**Why this works**: Rubber-duck debugging works because explaining forces clarity. An LLM is a rubber duck that asks helpful questions.
+
+**Effective prompt**:
+
+```
+Explain [concept] as if I'm a developer who knows [related thing] 
+but hasn't worked with [concept] before. Use analogies from [my domain]. 
+Flag common misconceptions and give me a concrete example I can try.
+```
+
+## What Doesn't Work
+
+LLMs are not good at:
+- Anything requiring current information without search (they have knowledge cutoffs)
+- Tasks where tone and relationship context matter (client emails, performance reviews)
+- Anything requiring physical interaction (obviously)
+- Decisions with ethical or legal dimensions (they lack accountability)
+- Creative work where originality matters (they reproduce patterns, not invent)
+
+If the cost of getting it wrong is high, keep a human in the loop.
+
+## Measuring Value
+
+The right metric is not "how much can I automate?" It's "how much mental effort am I saving on work that doesn't need my judgment?"
+
+Track this loosely: before using the workflow, how long did this task take and how much did it drain you? After, what's the comparison? If the automation adds friction or requires more oversight than manual work, it's not worth it.
+
+## What's Next
+
+- [AI Agents: What They Are and How to Use Them](/ai/what-are-ai-agents) — the foundation these workflows build on
+- [Building Your Own AI Agent System](/ai/building-agent-system) — local LLMs, tools, and scheduling
+- [Architecting Multi-Agent Systems](/ai/multi-agent-architecture) — when you outgrow single-agent patterns

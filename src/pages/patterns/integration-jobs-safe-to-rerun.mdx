@@ -1,0 +1,177 @@
+---
+layout: ../../layouts/ContentLayout.astro
+title: "Designing Integration Jobs That Are Safe to Rerun"
+description: "How to make jobs produce the same result whether they run once, twice, or restart halfway through."
+tags: ['integrations', 'pipelines', 'idempotency', 'operations']
+updated: "2026-10-24"
+---
+
+## Problem
+
+Integration jobs get run more than once. A scheduler overlaps two runs, an operator reruns a job after a failure, or a request times out after the destination system has already accepted it. Each repeat risks duplicate invoices, double-posted payments, or records that are half updated.
+
+## Context
+
+Scheduled imports, exports, and synchronisation jobs that move data between internal and third-party systems. Failures part-way through a run are normal, rerunning the job is the first thing an operations team will try, and the destination system rarely offers a way to undo what was sent.
+
+Typical constraints include:
+
+- source files or APIs that can return the same data more than once
+- destination APIs with no rollback and limited duplicate detection
+- jobs that process hundreds or thousands of items per run
+- no reliable way to tell, after a crash, which items were completed
+
+## Solution
+
+Design every step so that repeating it has no further effect once it has succeeded. This property is called <span class="jargon" data-tooltip="An operation is idempotent if running it several times has the same effect as running it once">idempotency</span>.
+
+A job built this way can be rerun at any point without investigation, which turns most failures into a simple retry.
+
+### 1. Identify every record by a stable business key
+
+Use the identifier the source system gives the record, such as an invoice number plus supplier, or an external reference. Avoid identities generated during the import or the row's position in a file, because these change between runs.
+
+Store the key and enforce it:
+
+```sql
+CREATE UNIQUE INDEX UX_ImportedInvoice_Source
+ON ImportedInvoice (SourceSystem, SourceReference);
+```
+
+The constraint is the safety net. Application checks alone can be bypassed by two runs that overlap.
+
+### 2. Write with upserts, not blind inserts
+
+Insert the record if it does not exist and update it if it does. A rerun then rewrites the same values instead of creating a second copy.
+
+See [UPSERT Without MERGE](/snippets/sql-upsert-without-merge) and [Update Only When Values Change](/snippets/sql-update-only-when-changed). The second avoids touching rows that have not changed, which keeps audit history and downstream change feeds clean.
+
+### 3. Record what has been processed
+
+Keep a <span class="jargon" data-tooltip="A table with one row per item processed, recording how far it got and what happened">processing ledger</span>: one row per item, with the stage it reached and the outcome. On a rerun, the job skips items that have already been completed.
+
+```sql
+-- Items staged but not yet posted
+SELECT s.SourceSystem, s.SourceReference
+FROM StagedInvoice s
+LEFT JOIN ProcessedItem p
+  ON p.SourceSystem = s.SourceSystem
+ AND p.SourceReference = s.SourceReference
+ AND p.Stage = 'Posted'
+WHERE p.SourceReference IS NULL;
+```
+
+This is the same staged model described in [Why Status Tables Fail Operations Teams](/patterns/status-tables-fail-operations), applied per item.
+
+### 4. Make outgoing calls idempotent as well
+
+The most dangerous failure is a request that times out after the destination has processed it. The job sees a failure, retries, and creates a duplicate.
+
+In order of preference:
+
+- **Idempotency key.** If the API supports one, send a key derived from the business key (not a new random value per attempt). The destination recognises the repeat and returns the original result.
+- **Check before create.** Query the destination for the external reference before posting. Slower, but works with most APIs.
+- **Mark before sending.** Record the item as `Sending` before the call and `Posted` after it. An item left in `Sending` after a crash goes to review rather than being resent automatically.
+
+The retry helper in [Retry fetch with Exponential Backoff and Jitter](/snippets/ts-fetch-retry-backoff) is only safe on top of one of these.
+
+### 5. Prevent two copies of the job running at once
+
+Overlapping runs can both read the same unprocessed items before either marks them complete. Take an exclusive lock for the duration of the run:
+
+```sql
+DECLARE @result INT;
+
+EXEC @result = sp_getapplock
+  @Resource = 'InvoiceImportJob',
+  @LockMode = 'Exclusive',
+  @LockOwner = 'Session',
+  @LockTimeout = 0;
+
+IF @result < 0
+BEGIN
+  RAISERROR('InvoiceImportJob is already running', 16, 1);
+  RETURN;
+END;
+
+-- ... job work ...
+
+EXEC sp_releaseapplock @Resource = 'InvoiceImportJob', @LockOwner = 'Session';
+```
+
+The lock is released automatically if the session ends, so a crashed run does not block the next one.
+
+## Trade-offs
+
+Idempotency adds tables, constraints, and extra lookups. Check-before-create doubles the number of calls to the destination, which matters for rate-limited APIs.
+
+Adding unique constraints to an existing system will also expose duplicates that were previously accepted silently. These have to be cleaned up before the constraint can be created (see [Find and Remove Duplicate Rows](/snippets/sql-remove-duplicates-row-number)).
+
+The processing ledger grows with every run and needs a retention rule.
+
+## Checks
+
+After implementing or changing a job:
+
+- run it twice in a row against the same input and confirm the second run changes nothing
+- stop it part-way through, restart it, and confirm every item is processed exactly once
+- simulate a timeout after the destination has accepted a request
+- start two instances at the same time and confirm one exits cleanly
+- confirm unique constraints exist on every business key the job relies on
+
+If the safe response to a failure is "don't rerun it", the job is not yet idempotent.
+
+## Notes
+
+Retries are only as safe as the operation being retried. Without idempotency, retry logic converts temporary network failures into permanent data errors.
+
+Operations teams will rerun jobs, usually under pressure and without reading the code first. Designing for that is cheaper than documenting why they shouldn't.
+
+<style is:global>{`
+  .jargon {
+    position: relative;
+    text-decoration: underline;
+    text-decoration-style: dotted;
+    text-decoration-color: var(--accent, #0ea5e9);
+    text-decoration-thickness: 2px;
+    text-underline-offset: 3px;
+    cursor: help;
+  }
+
+  .jargon::after {
+    content: attr(data-tooltip);
+    position: absolute;
+    bottom: 100%;
+    left: 50%;
+    transform: translateX(-50%) translateY(-8px);
+    padding: 0.625rem 0.875rem;
+    background: var(--surface-elevated, #2a2a2a);
+    color: var(--text-primary, #fff);
+    border: 1px solid var(--border, #444);
+    border-radius: 0.375rem;
+    font-size: 0.875rem;
+    line-height: 1.5;
+    white-space: normal;
+    max-width: 400px;
+    min-width: 200px;
+    width: max-content;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.2s ease;
+    z-index: 1000;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  }
+
+  .jargon:hover::after {
+    opacity: 1;
+  }
+
+  @media (max-width: 768px) {
+    .jargon::after {
+      left: 0;
+      transform: translateX(0) translateY(-8px);
+      max-width: 280px;
+      min-width: 180px;
+    }
+  }
+`}</style>

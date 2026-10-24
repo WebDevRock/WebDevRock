@@ -1,0 +1,345 @@
+---
+layout: ../../layouts/ContentLayout.astro
+title: "OutSystems REST API Implementation"
+description: "Implementation guide for REST API endpoints in OutSystems to track publish activity and application metrics."
+tags: [outsystems, rest-api, backend]
+updated: "2026-02-27"
+---
+
+## Overview
+
+This guide provides examples of implementing REST API endpoints in OutSystems for tracking publish activity and application metrics. Includes database queries, response structures, and security considerations.
+
+## Setup
+
+1. Create a new REST API in Service Studio
+2. Name it: `ActivityAPI`
+3. Set version to: `v1`
+4. Configure CORS if needed (see below)
+
+## Endpoint 1: GetPublishActivity
+
+**Method:** GET  
+**Path:** `/publish-activity`
+
+### Input Parameters
+
+- `DaysBack` (Integer, Optional, Default: 30)
+- `Application` (Text, Optional, Default: "")
+
+### Server Action Logic
+
+```sql
+SELECT 
+    e.Name AS ApplicationName,
+    CONVERT(VARCHAR, mv.VERSION_ID) AS VersionID,
+    mv.VERSION AS Version,
+    mv.UPLOADED_DATE AS PublishDate,
+    mv.UPLOADED_BY AS PublishedBy,
+    e.IS_ACTIVE AS IsActive,
+    ISNULL(ss.NAME, '') AS Solution
+FROM 
+    ossys_Module_Version mv
+INNER JOIN 
+    ossys_Espace e ON mv.ESPACE_ID = e.ID
+LEFT JOIN
+    ossys_Solution_Espace se ON e.ID = se.ESPACE_ID
+LEFT JOIN
+    ossys_Solution ss ON se.SOLUTION_ID = ss.ID
+WHERE 
+    mv.UPLOADED_DATE >= DATEADD(day, -@DaysBack, GETDATE())
+    AND (@Application = '' OR e.Name = @Application)
+ORDER BY 
+    mv.UPLOADED_DATE DESC
+```
+
+### Output Structure
+
+Create a Structure called `PublishActivityRecord`:
+- ApplicationName (Text)
+- VersionID (Text)
+- Version (Text)
+- PublishDate (DateTime)
+- PublishedBy (Text)
+- IsActive (Boolean)
+- Solution (Text)
+
+Create a Structure called `PublishActivityResponse`:
+- data (List of PublishActivityRecord)
+- totalRecords (Integer)
+- dateRange (DateRangeInfo)
+
+Create a Structure called `DateRangeInfo`:
+- start (DateTime)
+- end (DateTime)
+
+### Response Mapping
+
+In the REST API method:
+1. Call the Server Action with input parameters
+2. Assign the result to response.data
+3. Calculate response.totalRecords = Length(data)
+4. Set response.dateRange.start and response.dateRange.end
+
+---
+
+## Endpoint 2: GetApplicationList
+
+**Method:** GET  
+**Path:** `/application-list`
+
+### Input Parameters
+
+None
+
+### Server Action Logic
+
+```sql
+SELECT 
+    CONVERT(VARCHAR, e.ID) AS ID,
+    e.Name AS ApplicationName,
+    e.IS_ACTIVE AS IsActive,
+    COUNT(mv.VERSION_ID) AS TotalPublishes,
+    MAX(mv.UPLOADED_DATE) AS LastPublish,
+    MIN(mv.UPLOADED_DATE) AS FirstPublish
+FROM 
+    ossys_Espace e
+LEFT JOIN 
+    ossys_Module_Version mv ON e.ID = mv.ESPACE_ID
+GROUP BY 
+    e.ID, e.Name, e.IS_ACTIVE
+ORDER BY 
+    e.Name
+```
+
+### Output Structure
+
+Create a Structure called `ApplicationInfo`:
+- ID (Text)
+- ApplicationName (Text)
+- IsActive (Boolean)
+- TotalPublishes (Integer)
+- LastPublish (DateTime)
+- FirstPublish (DateTime)
+
+Create a Structure called `ApplicationListResponse`:
+- data (List of ApplicationInfo)
+- totalApplications (Integer)
+
+### Response Mapping
+
+In the REST API method:
+1. Call the Server Action
+2. Assign the result to response.data
+3. Calculate response.totalApplications = Length(data)
+
+---
+
+## Endpoint 3: GetDailySummary
+
+**Method:** GET  
+**Path:** `/daily-summary`
+
+### Input Parameters
+
+- `DaysBack` (Integer, Optional, Default: 30)
+
+### Server Action Logic
+
+```sql
+SELECT 
+    CONVERT(VARCHAR, CAST(mv.UPLOADED_DATE AS DATE), 23) AS PublishDate,
+    COUNT(*) AS PublishCount,
+    COUNT(DISTINCT mv.ESPACE_ID) AS UniqueApplications,
+    COUNT(DISTINCT mv.UPLOADED_BY) AS UniqueDevelopers
+FROM 
+    ossys_Module_Version mv
+WHERE 
+    mv.UPLOADED_DATE >= DATEADD(day, -@DaysBack, GETDATE())
+GROUP BY 
+    CAST(mv.UPLOADED_DATE AS DATE)
+ORDER BY 
+    CAST(mv.UPLOADED_DATE AS DATE) ASC
+```
+
+### Output Structure
+
+Create a Structure called `DailySummaryRecord`:
+- PublishDate (Text) — Format: YYYY-MM-DD
+- PublishCount (Integer)
+- UniqueApplications (Integer)
+- UniqueDevelopers (Integer)
+
+Create a Structure called `DailySummaryResponse`:
+- data (List of DailySummaryRecord)
+
+### Response Mapping
+
+In the REST API method:
+1. Call the Server Action with DaysBack parameter
+2. Assign the result to response.data
+
+---
+
+## CORS Configuration
+
+If your dashboard is hosted separately from your OutSystems server, add these response headers to each REST method.
+
+### OnRequest Callback
+
+Create a Server Action called `SetCORSHeaders` and add to the OnRequest callback:
+
+```javascript
+SetHTTPHeader(
+    Name: "Access-Control-Allow-Origin",
+    Value: "*"  // Or specify your domain: "https://your-dashboard.com"
+)
+
+SetHTTPHeader(
+    Name: "Access-Control-Allow-Methods",
+    Value: "GET, OPTIONS"
+)
+
+SetHTTPHeader(
+    Name: "Access-Control-Allow-Headers",
+    Value: "Content-Type, Authorization"
+)
+```
+
+### Handle OPTIONS Requests
+
+Create a REST method for OPTIONS:
+- Method: OPTIONS
+- Path: `/*`
+- Returns: Empty response with 204 status code
+
+---
+
+## Testing Your Endpoints
+
+### Test in OutSystems
+
+1. Publish your REST API
+2. Click "Open Documentation" on the REST API
+3. Try the endpoints in the Swagger interface
+
+### Test in Browser
+
+```javascript
+// Open browser console and test
+fetch('https://your-server/YourApp/rest/ActivityAPI/v1/publish-activity?daysBack=7')
+    .then(res => res.json())
+    .then(data => console.log(data));
+```
+
+### Test with PowerShell
+
+```powershell
+# Test the API
+$response = Invoke-RestMethod -Uri "https://your-server/YourApp/rest/ActivityAPI/v1/publish-activity?daysBack=7"
+$response | ConvertTo-Json -Depth 5
+```
+
+---
+
+## Example Full REST API Structure
+
+```
+ActivityAPI (REST API)
+├── v1
+│   ├── GetPublishActivity (GET /publish-activity)
+│   │   ├── Input: DaysBack, Application
+│   │   └── Output: PublishActivityResponse
+│   ├── GetApplicationList (GET /application-list)
+│   │   ├── Input: None
+│   │   └── Output: ApplicationListResponse
+│   └── GetDailySummary (GET /daily-summary)
+│       ├── Input: DaysBack
+│       └── Output: DailySummaryResponse
+└── OnRequest: SetCORSHeaders
+```
+
+---
+
+## Performance Optimization Tips
+
+### Cache Results
+
+For frequently accessed data, consider using OutSystems caching:
+
+```javascript
+// In Server Action
+If CachedData Is Valid Then
+    Return CachedData
+Else
+    FetchedData = QueryData()
+    CacheData(FetchedData, Duration: #24 Hours#)
+    Return FetchedData
+```
+
+### Limit Results
+
+Add pagination parameters if datasets are large.
+
+### Background Processing
+
+For complex aggregations, consider:
+- Timer to pre-calculate daily summaries
+- Store results in custom entities
+- REST API reads from pre-calculated data
+
+---
+
+## Security Considerations
+
+### Authentication
+
+Add authentication to your REST API:
+- Use OutSystems built-in authentication
+- Require API keys
+- Implement token-based auth
+
+### Authorization
+
+Check user permissions:
+
+```javascript
+If Not CheckActivityAPIPermission(GetUserId()) Then
+    Throw Unauthorized Exception
+```
+
+### Rate Limiting
+
+Implement rate limiting to prevent abuse.
+
+### Input Validation
+
+Always validate input parameters:
+
+```javascript
+If DaysBack < 1 Or DaysBack > 365 Then
+    Throw Invalid Parameter Exception
+```
+
+### Sensitive Data
+
+Avoid exposing sensitive information:
+- Filter out internal applications
+- Mask or exclude personal data
+- Log API access for auditing
+
+---
+
+## Deployment Checklist
+
+- [ ] Create REST API in Service Studio
+- [ ] Implement all three endpoints
+- [ ] Add CORS headers if needed
+- [ ] Test each endpoint with sample data
+- [ ] Verify JSON response format
+- [ ] Check performance with realistic data volumes
+- [ ] Add authentication/authorization
+- [ ] Deploy to development environment
+- [ ] Update dashboard with API endpoint URL
+- [ ] Test end-to-end integration
+- [ ] Deploy to production

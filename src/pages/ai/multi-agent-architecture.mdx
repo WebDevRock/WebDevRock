@@ -1,0 +1,225 @@
+---
+layout: ../../layouts/ContentLayout.astro
+title: "Architecting Multi-Agent Systems"
+description: "When one agent isn't enough. Routing, specialisation, coordination, and the patterns I've used to build systems like Hermes."
+tags: [ai, agents, architecture, multi-agent, advanced]
+level: advanced
+updated: "2026-06-21"
+---
+
+## Why Multiple Agents
+
+A single agent trying to do everything becomes mediocre at all of it. Specialisation works for the same reason it works in teams: focused expertise, consistent context, and clear boundaries.
+
+Hermes runs on this principle:
+
+- **HQ** coordinates and makes decisions about what gets built
+- **Scout** researches and surfaces relevant information
+- **Scribe** writes content in calibrated voice
+- **Reach** handles digital marketing strategy
+- **Dev** handles implementation
+
+Each agent has its own memory, instructions, and tools. They communicate through a shared task system, not by direct message passing.
+
+## When to Split Into Multiple Agents
+
+Split when:
+- One context window can't hold the relevant history (agents specialise and forget less)
+- Tasks require genuinely different expertise (research vs coding vs writing)
+- You need parallel execution (researching one thing while drafting another)
+- Different tools make sense for different tasks (web search for Scout, code execution for Dev)
+
+Don't split when:
+- The tasks are closely coupled and need constant coordination
+- You're adding agents for branding rather than function
+- A single agent with good tools and memory handles the workload fine
+
+## Routing Patterns
+
+### Pattern 1: Simple Router
+
+Incoming request → Router agent → Dispatch to specialist → Result returned
+
+The router doesn't do the work. It classifies the request and hands it off.
+
+```python
+# router.py
+AGENTS = {
+    "research": "research_agent.py",
+    "coding": "dev_agent.py",
+    "writing": "scribe_agent.py",
+    "marketing": "reach_agent.py"
+}
+
+def route(request):
+    prompt = f"""Given this request, classify it as one of: research, coding, writing, marketing.
+Be concise. Return only the category name.
+
+Request: {request}"""
+
+    category = call_llm(prompt).strip().lower()
+    agent_script = AGENTS.get(category, "general_agent.py")
+
+    # Execute the appropriate agent
+    subprocess.run(["python3", agent_script, request])
+```
+
+This is enough for most systems. The router is lightweight; the specialists are where the complexity lives.
+
+### Pattern 2: Pipeline
+
+Output of Agent A → Input of Agent B → Input of Agent C
+
+Useful for content pipelines:
+
+```
+Scout: Research topic → structured brief
+Scribe: Brief → draft content
+HQ: Review draft → approve, reject, or request revision
+Reach: Approved content → distribution plan
+```
+
+Each agent's output becomes the next agent's input. The format matters. If Scout outputs free text and Scribe expects a structured brief, you need an intermediate formatting step or well-designed prompts.
+
+### Pattern 3: Parallel with Aggregation
+
+Agent A and Agent B run simultaneously → Results combined by Agent C
+
+Example: Scout researches two angles on a topic while Scribe drafts a different piece. HQ reviews outputs from both when complete.
+
+This requires either:
+- A task queue (database table or message queue) that agents check
+- Cron jobs running on staggered schedules
+- Or explicit orchestration in a parent script
+
+## Shared State Without Chaos
+
+Multiple agents reading and writing the same files create race conditions. Solutions:
+
+### Task Database
+
+SQLite table as the single source of truth:
+
+```sql
+CREATE TABLE tasks (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    status TEXT DEFAULT 'pending',  -- pending, in_progress, completed, rejected
+    assigned_agent TEXT,
+    input TEXT,
+    output TEXT,
+    created_at TEXT,
+    updated_at TEXT
+);
+```
+
+Agents read tasks assigned to them, write output back, update status. No file collisions, no lost work.
+
+### File-per-Channel
+
+Each agent writes to its own output files:
+
+```
+scout_output.json
+scribe_drafts.md
+reach_plans.json
+```
+
+Agents read others' outputs as inputs. Simple, no database needed, but harder to query historically.
+
+## Memory Architecture
+
+Per-agent memory prevents context pollution. Scout doesn't need to know about Scribe's rejected drafts. But some shared context matters:
+
+- **Voice profile**: All content agents share the same voice calibration
+- **Project context**: What we're building, who's involved, what the constraints are
+- **Active priorities**: What's being worked on right now
+
+Structure:
+
+```
+memory/
+  shared/
+    voice_profile.json
+    project_context.json
+    active_priorities.md
+  scout/
+    trend_log.md
+    source_ratings.json
+  scribe/
+    approved_drafts.md
+    rejected_drafts.md
+```
+
+Shared memory is read-only for all agents except HQ. Per-agent memory is owned by that agent.
+
+## Failure Handling
+
+Agents fail. Plan for it:
+
+**Tool timeout**: If a web search hangs for 30 seconds, abort and retry once. If it fails again, log the error and continue without that data.
+
+**LLM errors**: Rate limits, server errors, malformed responses. Retry with exponential backoff. After 3 failures, log and escalate to human review.
+
+**Compounding errors**: Agent A produces bad output → Agent B works with garbage → Agent C produces nonsense. Mitigation:
+- Validation steps between agents (format checks, sanity checks)
+- Human approval gates at key transitions
+- Quality metrics that trigger review when they drop
+
+## Security Boundaries
+
+Agents with different trust levels need different access:
+
+**High trust** (runs on local machine, handles sensitive data):
+- File system access
+- Local LLMs only
+- No external API calls
+- Access to password managers, SSH keys, etc.
+
+**Medium trust** (coordinating, non-sensitive):
+- Web search allowed
+- API calls to known services
+- No access to credentials
+
+**Low trust** (experimental, untested):
+- Sandboxed execution
+- Read-only access
+- All actions logged and require approval
+
+Never give a low-trust agent the same keys as a high-trust one. Compromise of one should not compromise the others.
+
+## Monitoring: What to Track
+
+Without visibility, a multi-agent system becomes a black box that occasionally produces bad outputs.
+
+Track:
+- **Task volume**: How many tasks each agent processes per day/week
+- **Success rate**: How often tasks complete vs error out
+- **Latency**: How long tasks take from assignment to completion
+- **Quality drift**: Are approved outputs getting worse over time? (requires periodic human review)
+- **Cost**: Token usage for cloud LLMs, compute for local ones
+
+A simple dashboard (like the Hermes Mission Control) shows this in one place instead of scattered log files.
+
+## Practical Starting Point
+
+Don't build the full system at once. Start with two agents and a shared task list:
+
+1. Agent A does research and writes briefs
+2. Agent B takes briefs and produces drafts
+3. Both read from and write to a shared JSON file
+4. You review outputs manually
+
+When that's reliable:
+- Add routing for different request types
+- Add a third agent for a different function
+- Replace the JSON file with a database
+- Add scheduling and automation
+
+Each layer adds complexity. Only add it when the previous layer works.
+
+## What's Next
+
+- [AI Agents: What They Are and How to Use Them](/ai/what-are-ai-agents) — the single-agent foundation
+- [Building Your Own AI Agent System](/ai/building-agent-system) — local LLMs, tools, and scheduling
+- [LLM Productivity Workflows](/ai/llm-productivity-workflows) — daily patterns for work and life

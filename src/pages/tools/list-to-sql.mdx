@@ -1,0 +1,23 @@
+---
+layout: ../../layouts/ContentLayout.astro
+title: "List to SQL Converter"
+description: "Turn a pasted list of ids, or ids and new values, into a #temp table, an IN list, or JSON for OPENJSON."
+tags: [sql-server, data-fix, tool]
+updated: "2026-10-24"
+---
+
+import ListToSql from '../../components/tools/ListToSql.astro';
+
+Paste a column from a spreadsheet or ticket and get SQL Server input you can join to. Everything runs in your browser; nothing is sent anywhere.
+
+<ListToSql />
+
+## Notes
+
+- **Two columns:** paste id and value separated by a tab (copied from Excel) or a comma. Only the first comma splits, so values can contain commas.
+- **Single line:** `123,456,789` on one line is treated as a list of separate values.
+- **Types:** whole numbers become `INT` (or `BIGINT` when large). Anything else becomes `NVARCHAR`, so codes with leading zeros like `00123` keep them.
+- **Repeated ids:** removed by default, keeping the first. If the same id appears with different values, the tool warns you, because that usually means the source list is wrong.
+- **Large lists:** the #temp table output splits inserts into batches of 1,000 rows, the most SQL Server accepts in one `VALUES` list.
+
+The #temp table output uses the same shape as [Bulk Update with JOIN](/snippets/sql-bulk-update-join), and the JSON output follows [Pass a List of IDs Without Dynamic SQL](/snippets/sql-pass-id-list). Name the value column `new_<column>` (with the header option) to use it directly in the [Data Fix Script Builder](/tools/data-fix-script).

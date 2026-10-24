@@ -1,0 +1,146 @@
+---
+// Reversible data fix script builder
+import '../../styles/tools.css';
+---
+
+<div class="tool" data-tool="data-fix-script" data-pagefind-ignore>
+  <div class="tool-row">
+    <label>
+      What to do
+      <select data-field="action">
+        <option value="update">Update rows</option>
+        <option value="delete">Delete rows</option>
+      </select>
+    </label>
+    <label>
+      Rows to change come from
+      <select data-field="mode">
+        <option value="join">A table of keys (JOIN)</option>
+        <option value="filter">A WHERE filter</option>
+      </select>
+    </label>
+    <label>
+      Ticket or reference
+      <input type="text" data-field="ticket" placeholder="INC-1234" spellcheck="false" />
+    </label>
+  </div>
+
+  <div class="tool-row">
+    <label>
+      Table to fix
+      <input type="text" data-field="table" placeholder="dbo.Customer" spellcheck="false" />
+    </label>
+    <label>
+      Key column(s)
+      <input type="text" data-field="keys" placeholder="CustomerID" spellcheck="false" />
+    </label>
+    <label data-field="columns-option">
+      Columns being changed
+      <input type="text" data-field="columns" placeholder="Email, Status" spellcheck="false" />
+    </label>
+  </div>
+
+  <div class="tool-row" data-field="join-options">
+    <label>
+      <span data-field="source-label">Table holding the new values (key columns plus new_&lt;column&gt;)</span>
+      <input type="text" data-field="source" value="#temp_updates" spellcheck="false" />
+    </label>
+  </div>
+
+  <div class="tool-row" data-field="filter-options" hidden>
+    <label data-field="set-option">
+      SET clause
+      <input type="text" data-field="set" placeholder="Status = 'Archived'" spellcheck="false" />
+    </label>
+    <label>
+      WHERE clause (use alias t)
+      <input type="text" data-field="where" placeholder="t.Status = 'Closed' AND t.ClosedDate < '2024-01-01'" spellcheck="false" />
+    </label>
+  </div>
+
+  <div class="tool-row">
+    <label class="tool-check">
+      <input type="checkbox" data-field="batched" />
+      Run in batches
+    </label>
+    <label>
+      Batch size
+      <input type="number" data-field="batch-size" value="4000" min="1" step="1" />
+    </label>
+  </div>
+
+  <div class="tool-actions">
+    <button type="button" class="primary" data-field="generate">Generate script</button>
+    <button type="button" data-field="copy">Copy</button>
+  </div>
+
+  <p class="tool-status" data-field="status" aria-live="polite"></p>
+
+  <label>
+    Script
+    <textarea data-field="output" readonly spellcheck="false" rows="20"></textarea>
+  </label>
+</div>
+
+<script>
+  import { trackToolUse } from '../../scripts/analytics';
+  import { field, setStatus, wireCopyButton } from '../../scripts/tool-ui';
+  import { wireToolState } from '../../scripts/tool-state';
+  import { buildDataFix, type DataFixAction, type DataFixMode } from '../../scripts/tools/data-fix-script';
+
+  const root = document.querySelector<HTMLElement>('[data-tool="data-fix-script"]');
+
+  if (root) {
+    const value = (name: string) => field<HTMLInputElement>(root, name).value;
+    const action = field<HTMLSelectElement>(root, 'action');
+    const mode = field<HTMLSelectElement>(root, 'mode');
+    const batched = field<HTMLInputElement>(root, 'batched');
+    const output = field<HTMLTextAreaElement>(root, 'output');
+    const status = field<HTMLElement>(root, 'status');
+
+    // Show only the inputs the chosen action and mode use. A delete has no columns or SET clause,
+    // and its key table only needs the key columns.
+    const showOptions = () => {
+      const deleting = action.value === 'delete';
+      field(root, 'join-options').hidden = mode.value !== 'join';
+      field(root, 'filter-options').hidden = mode.value !== 'filter';
+      field(root, 'columns-option').hidden = deleting;
+      field(root, 'set-option').hidden = deleting;
+      field(root, 'source-label').textContent = deleting
+        ? 'Table holding the keys to delete'
+        : 'Table holding the new values (key columns plus new_<column>)';
+    };
+    action.addEventListener('change', showOptions);
+    mode.addEventListener('change', showOptions);
+
+    field<HTMLButtonElement>(root, 'generate').addEventListener('click', () => {
+      try {
+        output.value = buildDataFix({
+          table: value('table'),
+          keys: value('keys'),
+          columns: value('columns'),
+          action: action.value as DataFixAction,
+          mode: mode.value as DataFixMode,
+          source: value('source'),
+          setClause: value('set'),
+          where: value('where'),
+          ticket: value('ticket'),
+          batched: batched.checked,
+          batchSize: Number(value('batch-size')),
+          date: new Date(),
+        });
+        setStatus(status, 'Review every step before running it. Nothing here has been run against your database.');
+        // e.g. generate-join, generate-filter-batched, generate-delete-join
+        trackToolUse('data-fix-script', `generate-${action.value === 'delete' ? 'delete-' : ''}${mode.value}${batched.checked ? '-batched' : ''}`);
+      } catch (err) {
+        output.value = '';
+        setStatus(status, (err as Error).message, 'error');
+      }
+    });
+
+    wireCopyButton(field<HTMLButtonElement>(root, 'copy'), () => output.value, 'data-fix-script');
+
+    // Share links, and restoring inputs from a link (after the handlers above, so the result can be shown)
+    wireToolState(root, 'data-fix-script', status);
+  }
+</script>

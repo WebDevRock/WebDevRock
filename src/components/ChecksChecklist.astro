@@ -1,0 +1,294 @@
+---
+// Turns the list under a page's "## Checks" heading into tick boxes, remembered in this browser, with a
+// button that copies it as a Markdown task list for a change ticket (Jira, Azure DevOps, GitHub).
+// Without JavaScript the plain list stays as it is. The layout only includes this when the page has a Checks heading.
+---
+
+<template data-checklist-toolbar>
+  <div class="checklist-toolbar" data-pagefind-ignore>
+    <div class="checklist-progress" aria-hidden="true"><span data-checklist-bar></span></div>
+    <p class="checklist-count" role="status" data-checklist-count></p>
+    <div class="checklist-actions">
+      <button type="button" class="checklist-copy" data-checklist-copy>
+        <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="9" y="9" width="12" height="12" rx="2"></rect>
+          <path d="M5 15V5a2 2 0 0 1 2-2h10"></path>
+        </svg>
+        <span data-label>Copy for a ticket</span>
+      </button>
+      <button type="button" class="checklist-clear" data-checklist-clear>Clear ticks</button>
+    </div>
+  </div>
+</template>
+
+<script>
+  import { trackEvent } from '../scripts/analytics';
+
+  const heading = document.querySelector<HTMLElement>('.content h2#checks');
+  const template = document.querySelector<HTMLTemplateElement>('[data-checklist-toolbar]');
+
+  // The intro paragraph and list between the Checks heading and the next h2
+  const section: Element[] = [];
+  for (let el = heading?.nextElementSibling; el && el.tagName !== 'H2'; el = el.nextElementSibling) section.push(el);
+  const list = section.find((el) => el.tagName === 'UL') as HTMLUListElement | undefined;
+  const intro = section.find((el) => el.tagName === 'P' && section.indexOf(el) < section.indexOf(list!));
+
+  // Inline HTML to Markdown, for the ticket copy: code, links and emphasis; tooltips become plain text
+  function toMarkdown(node: Node): string {
+    if (node.nodeType === Node.TEXT_NODE) return node.textContent ?? '';
+    if (!(node instanceof HTMLElement)) return '';
+    if (node.matches('input')) return '';
+    const inner = [...node.childNodes].map(toMarkdown).join('');
+    switch (node.tagName) {
+      case 'CODE': return `\`${node.textContent}\``;
+      case 'A': return `[${inner}](${(node as HTMLAnchorElement).href})`;
+      case 'STRONG':
+      case 'B': return `**${inner}**`;
+      case 'EM':
+      case 'I': return `*${inner}*`;
+      default: return inner;
+    }
+  }
+
+  const clean = (text: string) => text.replace(/\s+/g, ' ').trim();
+
+  if (heading && template && list) {
+    const page = location.pathname;
+    const storageKey = `checks:${page}`;
+    const items = [...list.querySelectorAll<HTMLLIElement>(':scope > li')];
+
+    // Each item becomes a label around a checkbox, keeping its links, code and tooltips
+    const boxes = items.map((item, index) => {
+      const label = document.createElement('label');
+      const box = document.createElement('input');
+      box.type = 'checkbox';
+      box.dataset.index = String(index);
+      const text = document.createElement('span');
+      text.className = 'checklist-text';
+      text.append(...item.childNodes);
+      label.append(box, text);
+      item.append(label);
+      return box;
+    });
+    list.classList.add('checklist');
+
+    const toolbar = template.content.firstElementChild!.cloneNode(true) as HTMLElement;
+    list.after(toolbar);
+    const count = toolbar.querySelector<HTMLElement>('[data-checklist-count]')!;
+    const bar = toolbar.querySelector<HTMLElement>('[data-checklist-bar]')!;
+    const copyButton = toolbar.querySelector<HTMLButtonElement>('[data-checklist-copy]')!;
+    const copyLabel = copyButton.querySelector<HTMLElement>('[data-label]')!;
+
+    const render = () => {
+      const done = boxes.filter((b) => b.checked).length;
+      count.textContent = `${done} of ${boxes.length} done`;
+      bar.style.width = `${(done / boxes.length) * 100}%`;
+      toolbar.classList.toggle('complete', done === boxes.length);
+      items.forEach((item, i) => item.classList.toggle('done', boxes[i].checked));
+    };
+
+    const save = () => {
+      try {
+        const ticked = boxes.filter((b) => b.checked).map((b) => Number(b.dataset.index));
+        if (ticked.length) localStorage.setItem(storageKey, JSON.stringify(ticked));
+        else localStorage.removeItem(storageKey);
+      } catch {
+        // Blocked storage: ticks last until the page is closed
+      }
+    };
+
+    try {
+      const saved = JSON.parse(localStorage.getItem(storageKey) ?? '[]') as number[];
+      saved.forEach((i) => boxes[i] && (boxes[i].checked = true));
+    } catch {
+      // Nothing saved, or storage blocked
+    }
+    render();
+
+    let trackedTick = false;
+    list.addEventListener('change', () => {
+      render();
+      save();
+      if (!trackedTick) {
+        trackedTick = true;
+        trackEvent('checklist', { page, action: 'tick' });
+      }
+      if (boxes.every((b) => b.checked)) trackEvent('checklist', { page, action: 'complete' });
+    });
+
+    toolbar.querySelector('[data-checklist-clear]')?.addEventListener('click', () => {
+      boxes.forEach((b) => (b.checked = false));
+      render();
+      save();
+      trackEvent('checklist', { page, action: 'clear' });
+    });
+
+    let resetLabel = 0;
+    const setLabel = (text: string, state = '') => {
+      copyLabel.textContent = text;
+      copyButton.dataset.state = state;
+      clearTimeout(resetLabel);
+      if (state) resetLabel = window.setTimeout(() => setLabel('Copy for a ticket'), 2000);
+    };
+
+    copyButton.addEventListener('click', async () => {
+      const title = clean(document.querySelector('h1')?.textContent ?? document.title);
+      const markdown = [
+        `### Checks: ${title}`,
+        '',
+        ...(intro ? [clean(toMarkdown(intro)), ''] : []),
+        ...items.map((item, i) => `- [${boxes[i].checked ? 'x' : ' '}] ${clean(toMarkdown(item))}`),
+        '',
+        `Source: ${location.origin}${page}`,
+      ].join('\n');
+
+      try {
+        await navigator.clipboard.writeText(markdown + '\n');
+        trackEvent('checklist', { page, action: 'copy' });
+        setLabel('Copied!', 'copied');
+      } catch (err) {
+        console.error('Failed to copy checklist:', err);
+        setLabel('Copy failed', 'error');
+      }
+    });
+  }
+</script>
+
+<style is:global>
+  .content ul.checklist {
+    list-style: none;
+    padding-left: 0;
+  }
+
+  .content ul.checklist > li {
+    margin: 0.25rem 0;
+  }
+
+  .checklist label {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.75rem;
+    padding: 0.5rem 0.75rem;
+    border: 1px solid transparent;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: background 0.2s ease, border-color 0.2s ease;
+  }
+
+  .checklist label:hover {
+    background: var(--bg-surface);
+    border-color: var(--border-subtle);
+  }
+
+  .checklist input[type='checkbox'] {
+    flex: none;
+    width: 1.05rem;
+    height: 1.05rem;
+    margin-top: 0.3rem;
+    accent-color: var(--accent-lime);
+    cursor: pointer;
+  }
+
+  .checklist li.done .checklist-text {
+    color: var(--text-muted);
+  }
+
+  .checklist-toolbar {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    grid-template-areas:
+      'count actions'
+      'bar bar';
+    align-items: center;
+    gap: 0.75rem 1rem;
+    margin: 1rem 0 1.5rem;
+    padding: 0.875rem 1rem;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-subtle);
+    border-radius: 10px;
+  }
+
+  .checklist-progress {
+    grid-area: bar;
+    height: 4px;
+    background: var(--border);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+
+  .checklist-progress span {
+    display: block;
+    height: 100%;
+    width: 0;
+    background: var(--accent-lime);
+    transition: width 0.2s ease;
+  }
+
+  .checklist-count {
+    grid-area: count;
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+  }
+
+  .checklist-toolbar.complete .checklist-count {
+    color: var(--accent-lime);
+  }
+
+  .checklist-toolbar.complete .checklist-count::after {
+    content: ' ✓';
+  }
+
+  .checklist-actions {
+    grid-area: actions;
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 0.5rem;
+  }
+
+  .checklist-actions button {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.35rem 0.75rem;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text-secondary);
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    cursor: pointer;
+    transition: border-color 0.2s ease, color 0.2s ease;
+  }
+
+  .checklist-actions button:hover,
+  .checklist-actions button:focus-visible {
+    border-color: var(--accent-lime);
+    color: var(--text-primary);
+  }
+
+  .checklist-copy[data-state='copied'] {
+    border-color: var(--accent-lime);
+    color: var(--accent-lime);
+  }
+
+  .checklist-copy[data-state='error'] {
+    border-color: var(--accent-coral);
+    color: var(--accent-coral);
+  }
+
+  @media (max-width: 480px) {
+    .checklist-toolbar {
+      grid-template-columns: 1fr;
+      grid-template-areas:
+        'count'
+        'bar'
+        'actions';
+    }
+
+    .checklist-actions {
+      justify-content: flex-start;
+    }
+  }
+</style>

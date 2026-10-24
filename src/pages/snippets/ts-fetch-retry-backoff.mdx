@@ -1,0 +1,96 @@
+---
+layout: ../../layouts/ContentLayout.astro
+title: "TypeScript: Retry fetch with Exponential Backoff and Jitter"
+description: "A small typed fetch wrapper that retries timeouts, rate limits and server errors without hammering the API."
+tags: [typescript, javascript, http, integrations]
+updated: "2026-10-24"
+---
+
+import OpenInTool from '../../components/OpenInTool.astro';
+
+## Problem
+
+Calls to an external API fail now and then with timeouts, `429 Too Many Requests` or `503` errors. Failing the whole job on the first error is fragile, but retrying straight away (or every client retrying at the same moment) makes an overloaded API worse.
+
+## Solution
+
+Retry only errors that are worth retrying, wait longer after each attempt (exponential backoff), and randomise the wait (jitter) so clients spread out. Honour `Retry-After` when the server sends it.
+
+```ts
+type RetryOptions = {
+  retries?: number;     // retries after the first attempt
+  baseDelayMs?: number; // backoff for the first retry
+  maxDelayMs?: number;  // cap on any backoff delay
+  timeoutMs?: number;   // timeout for each attempt
+};
+
+const RETRYABLE_STATUS = new Set([408, 429, 500, 502, 503, 504]);
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+export async function fetchWithRetry(
+  url: string,
+  init: RequestInit = {},
+  { retries = 3, baseDelayMs = 500, maxDelayMs = 10_000, timeoutMs = 10_000 }: RetryOptions = {}
+): Promise<Response> {
+  for (let attempt = 0; ; attempt++) {
+    const timeout = AbortSignal.timeout(timeoutMs);
+    const signal = init.signal ? AbortSignal.any([init.signal, timeout]) : timeout;
+
+    let response: Response | undefined;
+    let error: unknown;
+
+    try {
+      response = await fetch(url, { ...init, signal });
+      if (!RETRYABLE_STATUS.has(response.status)) return response;
+    } catch (err) {
+      if (init.signal?.aborted) throw err; // cancelled by the caller: don't retry
+      error = err;                         // network failure or timeout
+    }
+
+    if (attempt >= retries) {
+      if (response) return response; // out of retries: let the caller see the last status
+      throw error;
+    }
+
+    // Full jitter: a random wait between 0 and the exponential cap
+    const backoff = Math.min(maxDelayMs, baseDelayMs * 2 ** attempt);
+    const delay = (response && retryAfterMs(response)) ?? Math.random() * backoff;
+
+    await response?.body?.cancel(); // free the connection before retrying
+    await sleep(delay);
+  }
+}
+
+// Retry-After can be a number of seconds or an HTTP date
+function retryAfterMs(response: Response): number | undefined {
+  const header = response.headers.get('Retry-After');
+  if (!header) return undefined;
+
+  const seconds = Number(header);
+  if (!Number.isNaN(seconds)) return seconds * 1000;
+
+  const date = Date.parse(header);
+  return Number.isNaN(date) ? undefined : Math.max(0, date - Date.now());
+}
+```
+
+Usage:
+
+```ts
+const res = await fetchWithRetry('https://api.example.com/orders', {}, { retries: 4 });
+
+if (!res.ok) throw new Error(`Orders request failed: ${res.status}`);
+const orders = await res.json();
+```
+
+<OpenInTool tool="retry-schedule" values={{ retries: 4 }} label="See how long retries: 4 can take in the Retry Schedule Calculator" />
+
+## Notes
+
+- Only retry requests that are safe to repeat. `GET`, `PUT` and `DELETE` normally are; a retried `POST` can create duplicates unless the API supports an idempotency key header.
+- `4xx` errors other than `408` and `429` mean the request itself is wrong, so retrying won't help.
+- With the defaults the worst case is 4 attempts of up to 10s each, plus up to 3.5s of waiting. Size `retries` and `timeoutMs` to what the caller can tolerate.
+- A long `Retry-After` is honoured as-is. Cap it if your job can't wait that long.
+- Needs `AbortSignal.timeout` and `AbortSignal.any`: Node 20.3+ and current browsers.
+- For pipelines, log each retry so repeated failures show up before they become an outage. See [Designing Integration Pipelines That Fail Safely](/patterns/integration-pipelines-fail-safely).

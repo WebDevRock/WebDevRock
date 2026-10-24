@@ -1,0 +1,21 @@
+---
+layout: ../../layouts/ContentLayout.astro
+title: "Retry Backoff Schedule Calculator"
+description: "See when each retry happens for an exponential backoff policy, and how long a call can take before it gives up."
+tags: [integrations, http, resilience, tool]
+updated: "2026-10-24"
+---
+
+import RetrySchedule from '../../components/tools/RetrySchedule.astro';
+
+Pick a retry policy and see when each attempt happens, including the worst case when every attempt times out. Everything runs in your browser; nothing is sent anywhere.
+
+<RetrySchedule />
+
+## Notes
+
+- **Delay before retry n** is `base × multiplier^(n−1)`, capped at the maximum delay.
+- **Full jitter** waits a random time between zero and that delay, which spreads out clients that failed at the same moment. **Equal jitter** keeps half the delay fixed and randomises the rest.
+- **Latest** assumes every attempt runs until its timeout and every wait is the longest possible. This is the number to compare with how long the caller can wait.
+- The defaults match [Retry fetch with Exponential Backoff and Jitter](/snippets/ts-fetch-retry-backoff), and "Copy fetchWithRetry options" gives you the options object for it. That snippet always uses a multiplier of 2 and full jitter.
+- Switch the units to minutes to plan retries across scheduled runs, as described in [Retry, Back Off, Give Up: Handling Unreliable External APIs](/patterns/handling-unreliable-external-apis).

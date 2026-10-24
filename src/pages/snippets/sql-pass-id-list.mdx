@@ -1,0 +1,76 @@
+---
+layout: ../../layouts/ContentLayout.astro
+title: "SQL Server: Pass a List of IDs Without Dynamic SQL"
+description: "Turn a comma-separated or JSON list into rows you can JOIN to, with no string concatenation or SQL injection risk."
+tags: [sql, sql-server, security, json]
+updated: "2026-10-24"
+sqlVersion: "2016"
+sqlNote: "STRING_SPLIT and OPENJSON also need database compatibility level 130 or higher."
+placeholders:
+  - token: "target_table"
+    label: "Table"
+    hint: "e.g. dbo.Orders"
+---
+
+import OpenInTool from '../../components/OpenInTool.astro';
+
+## Problem
+
+You have a list of IDs (from a ticket, a spreadsheet or an application) and need to use it in a query. Building `IN (...)` by concatenating strings is open to SQL injection, and very long `IN` lists are slow to compile.
+
+## Solution
+
+Pass the list as a single string parameter and turn it into rows with `STRING_SPLIT` or `OPENJSON`, then join to it.
+
+```sql
+-- Comma-separated list
+DECLARE @ids NVARCHAR(MAX) = N'123,456,789';
+
+SELECT t.*
+FROM target_table t
+JOIN (
+  SELECT DISTINCT TRY_CAST(value AS INT) AS id
+  FROM STRING_SPLIT(@ids, ',')
+  WHERE TRY_CAST(value AS INT) IS NOT NULL
+) ids ON ids.id = t.id;
+```
+
+A JSON array is easier to send from application code, which can serialise it directly:
+
+```sql
+-- JSON array, e.g. sent from an app as one parameter
+DECLARE @ids NVARCHAR(MAX) = N'[123, 456, 789]';
+
+SELECT t.*
+FROM target_table t
+WHERE t.id IN (SELECT CAST(value AS INT) FROM OPENJSON(@ids));
+```
+
+<OpenInTool tool="list-to-sql" values={{ input: '123\n456\n789', format: 'json' }} label="Turn a pasted column of ids into this JSON array in List to SQL" />
+
+`OPENJSON` can also load ids and values together, ready for a [Bulk Update with JOIN](/snippets/sql-bulk-update-join):
+
+```sql
+DECLARE @updates NVARCHAR(MAX) = N'[
+  {"id": 123, "value": "Updated Value A"},
+  {"id": 456, "value": "Updated Value B"}
+]';
+
+SELECT j.id, j.new_some_column
+INTO #temp_updates
+FROM OPENJSON(@updates)
+WITH (
+  id INT '$.id',
+  new_some_column NVARCHAR(255) '$.value'
+) j;
+```
+
+<OpenInTool tool="json-to-openjson" values={{ input: '[{"id": 123, "value": "Updated Value A"}, {"id": 456, "value": "Updated Value B"}]', path: '$' }} label="Generate the OPENJSON query for your own JSON in JSON to OPENJSON" />
+
+## Notes
+
+- Never build the query as `'... WHERE id IN (' + @ids + ')'` and run it with `EXEC`. Anything in the string runs as SQL.
+- `STRING_SPLIT` and `OPENJSON` need SQL Server 2016+ and database compatibility level 130 or higher.
+- `TRY_CAST` silently drops entries that aren't numbers. Compare the count of matched rows with the number of ids you expected.
+- From .NET, a table-valued parameter is the strongly typed alternative, but needs a user-defined table type in the database. A JSON string needs nothing extra.
+- For thousands of ids, load them into a `#temp` table with a primary key first and join to that, so SQL Server has statistics to plan with.

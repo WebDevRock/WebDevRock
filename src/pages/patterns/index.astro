@@ -1,0 +1,94 @@
+---
+import BaseLayout from '../../layouts/BaseLayout.astro';
+import Card from '../../components/Card.astro';
+
+// Automatically load all patterns from .mdx and .astro files (excluding index.astro)
+let patterns = [];
+try {
+  const patternFiles = await Astro.glob('./*.{astro,mdx}');
+  patterns = patternFiles
+    .filter(pattern => !pattern.file.endsWith('index.astro'))
+    .map(pattern => {
+      // Extract filename without extension for href
+      const filename = pattern.file.split('/').pop()?.replace(/\.(astro|mdx)$/, '');
+      
+      return {
+        title: pattern.frontmatter.title,
+        href: `/patterns/${filename}`,
+        tags: pattern.frontmatter.tags || [],
+        description: pattern.frontmatter.description
+      };
+    })
+    .sort((a, b) => a.title.localeCompare(b.title)); // Sort alphabetically by title
+} catch (e) {
+  // No content files found - patterns remains empty array
+}
+---
+
+<BaseLayout title="Patterns" description="Higher-level engineering approaches: integration pipelines, reversible data fixes, audit trails, retries, and processing stages.">
+  <div class="category-page">
+    <div class="page-header">
+      <h1>Patterns</h1>
+      <p>Higher-level engineering approaches and architectural patterns. Sync pipelines, audit logging, validation flows, processing stages.</p>
+    </div>
+
+    {patterns.length > 0 ? (
+      <div class="cards">
+        {patterns.map(pattern => (
+          <Card {...pattern} />
+        ))}
+      </div>
+    ) : (
+      <div class="empty-state">
+        <p>No patterns yet. Check back later.</p>
+      </div>
+    )}
+  </div>
+</BaseLayout>
+
+<style>
+  .category-page {
+    max-width: 1000px;
+    margin: 0 auto;
+  }
+
+  .page-header {
+    margin-bottom: 4rem;
+  }
+
+  .page-header h1 {
+    font-family: var(--font-serif);
+    font-size: clamp(2rem, 5vw, 3rem);
+    font-weight: 600;
+    margin-bottom: 1rem;
+    letter-spacing: -0.02em;
+  }
+
+  .page-header p {
+    font-size: 1.125rem;
+    color: var(--text-secondary);
+    line-height: 1.7;
+    max-width: 700px;
+  }
+
+  .cards {
+    display: grid;
+    gap: 1.5rem;
+    grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
+  }
+
+  .empty-state {
+    padding: 3rem;
+    text-align: center;
+    color: var(--text-muted);
+    background: var(--bg-surface);
+    border: 1px solid var(--border-subtle);
+    border-radius: 16px;
+  }
+
+  @media (max-width: 768px) {
+    .cards {
+      grid-template-columns: 1fr;
+    }
+  }
+</style>

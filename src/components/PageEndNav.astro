@@ -1,0 +1,243 @@
+---
+// End-of-page navigation: learning path previous/next, then related pages by shared tags
+import TypeLabel from './TypeLabel.astro';
+import { byUpdated, getContentPages, getPathPositions, getRelatedPages, getSection } from '../lib/content';
+
+interface Props {
+  path: string; // normalised, e.g. /snippets/sql-bulk-update-join/
+}
+
+const { path } = Astro.props;
+const positions = getPathPositions(path);
+
+// Don't repeat pages already linked as previous/next
+const linked = positions.flatMap((p) => [p.previous?.path, p.next?.path]).filter((p) => p !== undefined);
+let related = getRelatedPages(path, 3, linked);
+let relatedHeading = 'Related';
+
+// No shared tags: fall back to the newest pages in the same section
+const sectionKey = path.split('/')[1];
+if (related.length === 0 && sectionKey) {
+  related = getContentPages()
+    .filter((p) => p.section === sectionKey && p.path !== path && !linked.includes(p.path))
+    .sort(byUpdated)
+    .slice(0, 3);
+  relatedHeading = `More ${getSection(sectionKey)?.name ?? ''}`.trim();
+}
+---
+
+{(positions.length > 0 || related.length > 0) && (
+  <aside class="page-end" aria-label="Keep reading" data-pagefind-ignore>
+    {positions.map((pos) => (
+      <nav class="path-nav" aria-label={`${pos.title}: step ${pos.step} of ${pos.total}`}>
+        <p class="path-label">
+          <span class="path-kicker">Learning path</span>
+          <span class="path-title">{pos.title}</span>
+          <span class="path-step">Step {pos.step} of {pos.total}</span>
+        </p>
+        <div class="path-progress" aria-hidden="true">
+          {Array.from({ length: pos.total }, (_, i) => <span class:list={{ done: i < pos.step }} />)}
+        </div>
+        <div class="path-links">
+          {pos.previous ? (
+            <a class="path-link previous" href={pos.previous.path} data-umami-event="next-step-click" data-umami-event-target={`previous-${pos.previous.slug}`}>
+              <span class="direction">← Previous</span>
+              <span class="link-title">{pos.previous.frontmatter.title}</span>
+            </a>
+          ) : (
+            <span />
+          )}
+          {pos.next ? (
+            <a class="path-link next" href={pos.next.path} data-umami-event="next-step-click" data-umami-event-target={`next-${pos.next.slug}`}>
+              <span class="direction">Next step →</span>
+              <span class="link-title">{pos.next.frontmatter.title}</span>
+            </a>
+          ) : (
+            <a class="path-link next" href="/#start-here" data-umami-event="next-step-click" data-umami-event-target="path-complete">
+              <span class="direction">Path complete ✓</span>
+              <span class="link-title">Back to the learning paths</span>
+            </a>
+          )}
+        </div>
+      </nav>
+    ))}
+
+    {related.length > 0 && (
+      <section class="related" aria-labelledby="related-heading">
+        <h2 id="related-heading">{relatedHeading}</h2>
+        <ul>
+          {related.map((page) => (
+            <li>
+              <a href={page.path} data-umami-event="related-click" data-umami-event-target={page.slug}>
+                <TypeLabel section={page.section} />
+                <span class="related-title">{page.frontmatter.title}</span>
+                {page.frontmatter.description && <span class="related-description">{page.frontmatter.description}</span>}
+              </a>
+            </li>
+          ))}
+        </ul>
+      </section>
+    )}
+  </aside>
+)}
+
+<style>
+  .page-end {
+    display: grid;
+    gap: 2.5rem;
+    margin-top: 4rem;
+    padding-top: 2.5rem;
+    border-top: 1px solid var(--border-subtle);
+  }
+
+  /* Learning path */
+  .path-nav {
+    padding: 1.25rem;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-subtle);
+    border-radius: 14px;
+  }
+
+  .path-label {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0.25rem 0.75rem;
+    margin-bottom: 0.75rem;
+  }
+
+  .path-kicker {
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: var(--text-muted);
+  }
+
+  .path-title {
+    font-weight: 600;
+  }
+
+  .path-step {
+    margin-left: auto;
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+    color: var(--text-muted);
+  }
+
+  .path-progress {
+    display: flex;
+    gap: 0.375rem;
+    margin-bottom: 1rem;
+  }
+
+  .path-progress span {
+    flex: 1;
+    height: 4px;
+    border-radius: 2px;
+    background: var(--border);
+  }
+
+  .path-progress span.done {
+    background: var(--gradient-1);
+  }
+
+  .path-links {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.75rem;
+  }
+
+  .path-link {
+    display: grid;
+    gap: 0.25rem;
+    padding: 0.875rem 1rem;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    color: var(--text-primary);
+    text-decoration: none;
+    transition: border-color 0.2s ease;
+  }
+
+  .path-link.next {
+    text-align: right;
+  }
+
+  .path-link:hover,
+  .path-link:focus-visible {
+    border-color: var(--accent-coral);
+  }
+
+  .direction {
+    font-size: 0.8rem;
+    color: var(--text-muted);
+  }
+
+  .path-link.next .direction {
+    color: var(--accent-coral);
+  }
+
+  .link-title {
+    font-weight: 500;
+    line-height: 1.4;
+  }
+
+  /* Related */
+  .related h2 {
+    margin-bottom: 1rem;
+    font-size: 0.8rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.15em;
+    color: var(--text-muted);
+  }
+
+  .related ul {
+    list-style: none;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    gap: 0.75rem;
+  }
+
+  .related a {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.5rem;
+    height: 100%;
+    padding: 1rem;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-subtle);
+    border-radius: 12px;
+    color: var(--text-primary);
+    text-decoration: none;
+    transition: border-color 0.2s ease;
+  }
+
+  .related a:hover,
+  .related a:focus-visible {
+    border-color: var(--accent-cyan);
+  }
+
+  .related-title {
+    font-weight: 500;
+    line-height: 1.4;
+  }
+
+  .related-description {
+    font-size: 0.85rem;
+    color: var(--text-muted);
+    line-height: 1.5;
+  }
+
+  @media (max-width: 600px) {
+    .path-links {
+      grid-template-columns: 1fr;
+    }
+
+    .path-link.next {
+      text-align: left;
+      order: -1;
+    }
+  }
+</style>

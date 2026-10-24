@@ -1,0 +1,155 @@
+---
+layout: ../../layouts/ContentLayout.astro
+title: "AI Agents: What They Are and How to Use Them"
+description: "Stop treating AI as a chatbot. Start treating it as a system. What AI agents actually are, how they differ from LLMs, and practical workflows you can set up today."
+tags: [ai, agents, llm, automation, beginner]
+level: beginner
+updated: "2026-06-21"
+---
+
+## The Difference Between an LLM and an Agent
+
+An LLM is a conversation partner. You ask, it answers. The exchange ends there.
+
+An agent is a system that can reason, make decisions, use tools, and run autonomously. The LLM is the brain. The agent is the whole body. The sensors, tools, memory, and scheduling turn replies into actions.
+
+Real examples from my own setup:
+
+- **Hermes** coordinates multiple specialised agents (Scout, Scribe, Reach, Dev) that research, write, and build independently
+- **Sage** drafts social media content but doesn't post it. It studies voice, remembers what worked, and queues drafts for human approval
+- A cron agent fetches AI trends from Hacker News twice daily, ranks them by relevance to my niche, and delivers a report each morning
+
+## What an Agent Actually Needs
+
+You don't need complex architecture to start. Every useful agent has the same components:
+
+| Component | Purpose | Example |
+|-----------|---------|---------|
+| **LLM** | Reasoning and decision-making | Local model via Ollama, or API call to Claude/GPT |
+| **Tools** | Actions the agent can take | Read files, call APIs, search the web, send messages |
+| **Memory** | Context across conversations | What we've discussed, what was approved, what failed |
+| **Instructions** | What the agent should do and how to behave system prompt defining role and rules |
+| **Trigger** | When it runs | User request, cron schedule, webhook, file change |
+
+The trigger is what separates agents from chatbots. A chatbot waits for you. An agent acts on its own schedule or in response to events.
+
+## Local vs Cloud: What Actually Matters
+
+**Cloud LLMs (OpenAI, Anthropic, Google)**
+- Best reasoning quality, especially for complex tasks
+- You send your data to someone else's server
+- Token costs add up fast at scale
+- Requires internet connection
+
+**Local LLMs (Ollama, llama.cpp)**
+- Your data never leaves your machine
+- No ongoing costs once set up
+- Works offline
+- Slower, less capable than the best cloud models
+- You need hardware: a decent GPU for larger models, or patience with smaller ones
+
+My setup: cloud for reasoning-heavy tasks (planning, strategy, complex coding), local for sensitive data and high-volume automation. A 7B parameter model on a mid-range GPU is enough for text classification, summarisation, and drafting. For anything requiring deep reasoning or coding quality, I route to Claude.
+
+## A Simple Agent You Can Build Today
+
+This is a cron-scheduled agent that reads a file, makes a decision, and writes back. No framework required.
+
+```python
+# daily_summary.py — runs via cron every morning
+import json
+from datetime import datetime
+
+# Your task list
+with open('tasks.json', 'r') as f:
+    tasks = json.load(f)
+
+# Logic: find overdue tasks, generate summary
+overdue = [t for t in tasks if t['due'] < datetime.now().isoformat() and t['status'] != 'done']
+pending = [t for t in tasks if t['status'] == 'pending']
+
+summary = f"""DAILY SUMMARY — {datetime.now().strftime('%Y-%m-%d')}
+
+Overdue: {len(overdue)}
+Pending: {len(pending)}
+
+Next 3 priorities:
+"""
+
+for task in pending[:3]:
+    summary += f"- {task['title']} (due {task['due'][:10]})\n"
+
+with open('daily_report.txt', 'w') as f:
+    f.write(summary)
+
+print("Report generated.")
+```
+
+Connect an LLM for reasoning instead of hard-coded logic, and you have an actual agent:
+
+```python
+# Same concept, but with LLM reasoning
+import json
+from datetime import datetime
+
+with open('tasks.json', 'r') as f:
+    tasks = json.load(f)
+
+# Build a prompt with context
+context = json.dumps(tasks[:20])  # last 20 tasks
+prompt = f"""Given these tasks, identify the 3 most important for today.
+Consider deadlines, blocked dependencies, and priority levels.
+
+Tasks: {context}
+
+Return only the titles, one per line."""
+
+# Send to local LLM or API
+# response = call_llm(prompt)
+# Write to report file
+```
+
+No special framework. Just a script that runs on a schedule, reads data, reasons about it, and acts.
+
+## Common Patterns I've Found Useful
+
+### 1. Research Agent
+Fetches information from multiple sources, synthesises it, and delivers a summary. I use this for trend scouting. The agent checks Hacker News, RSS feeds, and specific subreddits, then ranks items by relevance to my niche.
+
+### 2. Content Agent
+Maintains a voice profile, tracks what performed well, and drafts content in that style. Sage does this for me. It doesn't post to X, but it drafts tweets, threads, and LinkedIn posts that I review and queue.
+
+### 3. Review Agent
+Reads code, pull requests, or documents and provides structured critique. Useful for catching issues before human review.
+
+### 4. Triage Agent
+Routes incoming items (emails, alerts, messages) based on content and urgency. Less "reply for me" and more "flag the three that need my attention today."
+
+## What Makes an Agent Useful vs Gimmicky
+
+Useful:
+- Runs on a schedule or responds to events without waiting for you
+- Has persistent memory — remembers what you approved, rejected, or requested last time
+- Uses tools to actually do things rather than only suggesting
+- Hands off to you at the right point (approval, exception handling, final decisions)
+
+Gimmicky:
+- Repackages a chatbot with fancy branding
+- Tries to do everything; ends up doing nothing well
+- No memory — repeats the same mistakes every session
+- Acts without your approval on things you care about
+
+## Getting Started
+
+1. Pick one repetitive task you do daily or weekly
+2. Write the manual steps as a script first
+3. Replace the decision points with LLM calls
+4. Add memory (a file, a database table, or just structured logs)
+5. Schedule it with cron or a task scheduler
+
+Don't build the whole system at once. Start with one agent for one task, get it reliable, then expand.
+
+## What's Next
+
+- [Building Your Own AI Agent System](/ai/building-agent-system) — local LLMs, tool calling, and scheduling with real examples
+- [LLM Productivity Workflows](/ai/llm-productivity-workflows) — daily patterns for organising work and life
+- [Architecting Multi-Agent Systems](/ai/multi-agent-architecture) — routing, coordination, and when to split into multiple agents

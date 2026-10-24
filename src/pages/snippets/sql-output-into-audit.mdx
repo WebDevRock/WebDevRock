@@ -1,0 +1,97 @@
+---
+layout: ../../layouts/ContentLayout.astro
+title: "SQL Server: Record Changed Rows with OUTPUT INTO"
+description: "Capture before and after values of an UPDATE or DELETE in the same statement, so any data fix can be undone."
+tags: [sql, sql-server, data-fix, audit]
+updated: "2026-10-24"
+sqlVersion: "2008"
+placeholders:
+  - token: "target_table"
+    label: "Table"
+    hint: "e.g. dbo.Orders"
+  - token: "id"
+    label: "Key column"
+    hint: "e.g. OrderId"
+  - token: "some_column"
+    label: "Column to change"
+    hint: "e.g. Status"
+  - token: "fix_audit_20261024"
+    label: "Audit table"
+    hint: "e.g. fix_audit_TICKET123"
+  - token: "deleted_rows_20261024"
+    label: "Deleted rows table (delete example)"
+---
+
+import OpenInTool from '../../components/OpenInTool.astro';
+
+## Problem
+
+You're running a data fix in production and need a record of exactly what changed, with the old values, so you can prove what happened and roll it back later if needed.
+
+## Solution
+
+Use the `OUTPUT` clause to write the `deleted` (before) and `inserted` (after) values into an audit table as part of the same statement.
+
+```sql
+-- 1) Create an audit table for this fix
+CREATE TABLE dbo.fix_audit_20261024 (
+  id INT NOT NULL,
+  old_some_column NVARCHAR(255) NULL,
+  new_some_column NVARCHAR(255) NULL,
+  changed_at DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME()
+);
+
+-- 2) Update and capture the changes in one statement
+BEGIN TRAN;
+
+UPDATE t
+SET t.some_column = tu.new_some_column
+OUTPUT inserted.id, deleted.some_column, inserted.some_column
+  INTO dbo.fix_audit_20261024 (id, old_some_column, new_some_column)
+FROM target_table t
+JOIN #temp_updates tu ON tu.id = t.id;
+
+SELECT @@ROWCOUNT AS rows_updated;
+
+-- 3) Check the audit matches what you expected
+SELECT * FROM dbo.fix_audit_20261024;
+
+-- COMMIT;
+-- ROLLBACK;
+```
+
+<OpenInTool tool="data-fix-script" values={{ table: 'target_table', keys: 'id', columns: 'some_column', mode: 'join', source: '#temp_updates', ticket: 'INC-1234' }} label="Generate the whole fix (backup, update, checks and rollback) in the Data Fix Script Builder" />
+
+To undo the fix later, join back to the audit table:
+
+```sql
+BEGIN TRAN;
+
+UPDATE t
+SET t.some_column = a.old_some_column
+FROM target_table t
+JOIN dbo.fix_audit_20261024 a ON a.id = t.id;
+
+SELECT @@ROWCOUNT AS rows_restored;
+
+-- COMMIT;
+-- ROLLBACK;
+```
+
+For deletes, only `deleted` exists. Capture every column you'd need to re-insert the row:
+
+```sql
+DELETE t
+OUTPUT deleted.id, deleted.some_column, deleted.created_at
+  INTO dbo.deleted_rows_20261024 (id, some_column, created_at)
+FROM target_table t
+JOIN #rows_to_delete d ON d.id = t.id;
+```
+
+## Notes
+
+- The audit rows are written in the same transaction as the change, so a `ROLLBACK` removes both. The audit can never disagree with the data.
+- Create the audit table with an explicit `CREATE TABLE`. A copy made with `SELECT ... INTO` keeps any identity column, and `OUTPUT INTO` then fails when it tries to insert explicit ids.
+- The `OUTPUT INTO` table can't have enabled triggers, foreign keys or check constraints. A plain table like the one above is fine.
+- Works with batched changes too: add the `OUTPUT` clause inside the loop from [Update or Delete Millions of Rows in Batches](/snippets/sql-batch-update-delete).
+- This is the hands-on part of [Designing a Reversible Data Fix in SQL Server](/patterns/sql-reversible-data-fix).

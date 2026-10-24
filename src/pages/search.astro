@@ -1,0 +1,53 @@
+---
+// Full-page search, also the fallback for the header link. Supports /search/?q=term
+import BaseLayout from '../layouts/BaseLayout.astro';
+---
+
+<BaseLayout title="Search" description="Search the patterns, snippets, tools and guides on WebDevRock.">
+  <div class="search-page">
+    <h1>Search</h1>
+    <p class="intro">Search every pattern, snippet, tool and guide. Press <kbd>/</kbd> on any page to search from there.</p>
+    <div id="search-page-ui" class="search-ui">
+      <noscript><p class="search-unavailable">Search needs JavaScript. You can also browse by <a href="/tags/">tag</a>.</p></noscript>
+    </div>
+  </div>
+</BaseLayout>
+
+<script>
+  import { mountSearch } from '../scripts/search';
+
+  const term = new URLSearchParams(location.search).get('q') ?? '';
+  mountSearch('#search-page-ui', 'page', term);
+</script>
+
+<style>
+  .search-page {
+    max-width: 800px;
+    margin: 0 auto;
+    padding-top: 2rem;
+  }
+
+  h1 {
+    font-family: var(--font-serif);
+    font-size: clamp(2rem, 5vw, 3rem);
+    font-weight: 600;
+    margin-bottom: 0.5rem;
+  }
+
+  .intro {
+    color: var(--text-secondary);
+    margin-bottom: 2rem;
+  }
+
+  kbd {
+    padding: 0 0.4rem;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+  }
+
+  .search-page a {
+    color: var(--link);
+  }
+</style>

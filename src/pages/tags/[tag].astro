@@ -1,0 +1,129 @@
+---
+import BaseLayout from '../../layouts/BaseLayout.astro';
+import PageList from '../../components/PageList.astro';
+import { SECTIONS, byUpdated, getTags, type TagInfo } from '../../lib/content';
+
+export function getStaticPaths() {
+  return getTags().map((tag) => ({ params: { tag: tag.slug }, props: { tag } }));
+}
+
+interface Props {
+  tag: TagInfo;
+}
+
+const { tag } = Astro.props;
+const pages = [...tag.pages].sort(byUpdated);
+
+// "3 patterns, 2 snippets and 1 tool"
+const counts = SECTIONS.map((s) => ({ section: s, count: pages.filter((p) => p.section === s.key).length })).filter((c) => c.count > 0);
+const parts = counts.map(({ section, count }) => {
+  const noun = count === 1 ? section.singular.toLowerCase() : section.name.toLowerCase();
+  return `${count} ${section.key === 'ai' ? (count === 1 ? 'AI guide' : 'AI guides') : noun}`;
+});
+const summary = parts.length > 1 ? `${parts.slice(0, -1).join(', ')} and ${parts.at(-1)}` : parts[0];
+
+// Other tags used on these pages, as a way to move sideways
+const paths = new Set(pages.map((p) => p.path));
+const otherTags = getTags()
+  .filter((t) => t.slug !== tag.slug && t.pages.some((p) => paths.has(p.path)))
+  .slice(0, 12);
+---
+
+<BaseLayout title={`#${tag.label}`} description={`${summary} tagged ${tag.label} on WebDevRock.`}>
+  <div class="tag-page">
+    <a class="back" href="/tags/">← All tags</a>
+    <header class="page-header">
+      <h1>#{tag.label}</h1>
+      <p>{summary}.</p>
+    </header>
+
+    <PageList pages={pages} track={`tag-${tag.slug}`} />
+
+    {otherTags.length > 0 && (
+      <section class="related-tags" aria-labelledby="related-tags-heading">
+        <h2 id="related-tags-heading">Related tags</h2>
+        <ul>
+          {otherTags.map((t) => (
+            <li>
+              <a href={`/tags/${t.slug}/`} data-umami-event="tag-click" data-umami-event-target={`related-${t.slug}`}>#{t.label}</a>
+            </li>
+          ))}
+        </ul>
+      </section>
+    )}
+  </div>
+</BaseLayout>
+
+<style>
+  .tag-page {
+    max-width: 900px;
+    margin: 0 auto;
+    padding-top: 2rem;
+  }
+
+  .back {
+    display: inline-block;
+    margin-bottom: 1.5rem;
+    color: var(--text-muted);
+    font-size: 0.9rem;
+    text-decoration: none;
+  }
+
+  .back:hover {
+    color: var(--text-primary);
+  }
+
+  .page-header {
+    margin-bottom: 2rem;
+  }
+
+  .page-header h1 {
+    font-family: var(--font-mono);
+    font-size: clamp(1.75rem, 5vw, 2.5rem);
+    font-weight: 600;
+    margin-bottom: 0.5rem;
+    word-break: break-word;
+  }
+
+  .page-header p {
+    color: var(--text-secondary);
+  }
+
+  .related-tags {
+    margin-top: 3rem;
+  }
+
+  .related-tags h2 {
+    margin-bottom: 1rem;
+    font-size: 0.8rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.15em;
+    color: var(--text-muted);
+  }
+
+  .related-tags ul {
+    list-style: none;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+
+  .related-tags a {
+    display: inline-block;
+    padding: 0.3rem 0.7rem;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-subtle);
+    border-radius: 8px;
+    color: var(--text-secondary);
+    font-family: var(--font-mono);
+    font-size: 0.85rem;
+    text-decoration: none;
+  }
+
+  .related-tags a:hover,
+  .related-tags a:focus-visible {
+    border-color: var(--accent-cyan);
+    color: var(--text-primary);
+  }
+</style>

@@ -1,0 +1,184 @@
+---
+layout: ../../layouts/ContentLayout.astro
+title: "Designing a Reversible Data Fix in SQL Server"
+description: "A repeatable approach for production-safe updates with verification and rollback."
+tags: ['sql-server', 'data-fix', 'operations']
+updated: "2026-02-12"
+---
+
+## Problem
+
+Production data needs to be corrected, but the impact of an incorrect update is difficult to predict. Once changes are applied, reverting them is often slower and riskier than the original issue.
+
+This commonly occurs when correcting configuration data, security mappings, integration results, or accounting-related records where only a subset of rows should change.
+
+## Context
+
+In many operational systems the schema cannot be modified, indexes cannot be added, and the data model is only partially understood. Updates are often required urgently, sometimes while the system remains live.
+
+Typical constraints include:
+
+- third-party databases or legacy schemas
+- limited test environments
+- audit sensitivity around direct updates
+- large tables where accidental updates are expensive
+- business users relying on immediate correction
+
+Under these conditions, the goal is not simply to update data correctly. The goal is to make the change safe to undo.
+
+## Solution
+
+The safest approach is to treat a data fix as a controlled operation with a defined entry and exit, rather than a single `UPDATE` statement.
+
+### 1. Identify the exact rows first
+
+Start with a `SELECT` that returns only the rows intended to change. Avoid writing the `UPDATE` until this query is stable.
+
+```sql
+SELECT *
+FROM DataRoomSecurityAccessLevels
+WHERE RoomID = 10
+  AND CategoryID = 93
+  AND SubUserID = @UserID;
+```
+
+Validate this result with the person requesting the change where possible. The most common failure at this stage is incorrect assumptions about filtering.
+
+### 2. Capture the current state
+
+Before updating anything, copy the affected rows into a safety table.
+
+```sql
+SELECT *
+INTO DataFix_Backup_20260212
+FROM DataRoomSecurityAccessLevels
+WHERE RoomID = 10
+  AND CategoryID = 93
+  AND SubUserID = @UserID;
+```
+
+This creates an immediate <span class="jargon" data-tooltip="Ability to undo changes and restore previous data state">rollback</span> path without relying on <span class="jargon" data-tooltip="Database log files that record all transactions for recovery purposes">transaction logs</span> or backups.
+
+The backup table should include:
+
+- all columns
+- timestamp in the name
+- enough information to uniquely identify rows
+
+To capture the before and after values in the same statement as the update, see [Record Changed Rows with OUTPUT INTO](/snippets/sql-output-into-audit).
+
+### 3. Perform the update using a JOIN
+
+Avoid updating rows based purely on filters where possible. Joining against a known dataset reduces risk.
+
+```sql
+UPDATE t
+SET AccessLevelCode = s.AccessLevelCode
+FROM DataRoomSecurityAccessLevels t
+JOIN SourceAccessLevels s
+  ON t.RoomID = s.RoomID
+ AND t.CategoryID = s.CategoryID
+WHERE t.SubUserID = @UserID;
+```
+
+This makes the update explicit and easier to reason about.
+
+### 4. Verify immediately after update
+
+Run the original `SELECT` again and compare counts and values.
+
+Typical checks include:
+
+- number of affected rows
+- expected values applied
+- no unintended rows included
+
+### 5. Keep the rollback query ready
+
+Because the original rows were captured, rollback is straightforward:
+
+```sql
+UPDATE t
+SET AccessLevelCode = b.AccessLevelCode
+FROM DataRoomSecurityAccessLevels t
+JOIN DataFix_Backup_20260212 b
+  ON t.PrimaryKeyID = b.PrimaryKeyID;
+```
+
+Rollback should be prepared before the update runs, not after.
+
+## Trade-offs
+
+This approach adds time compared to a direct update. For small fixes it can feel excessive.
+
+However, the overhead is small compared to investigating unintended changes in production, particularly in systems where <span class="jargon" data-tooltip="Records of who changed what data and when, often required for compliance">audit trails</span> or <span class="jargon" data-tooltip="Other systems or processes that depend on this data">downstream integrations</span> are involved.
+
+Creating backup tables also increases short-term data volume, so they should be removed once the change is confirmed stable.
+
+## Checks
+
+After applying the fix:
+
+- confirm affected row counts match expectations
+- verify <span class="jargon" data-tooltip="Other systems or processes that consume or depend on this data">downstream systems</span> behave as expected
+- check reporting outputs that depend on the updated data
+- confirm no new validation errors appear in integration pipelines
+
+If the change affects permissions or configuration, test using a real user scenario rather than relying solely on data inspection.
+
+## Notes
+
+Most production data issues are not caused by incorrect SQL syntax but by incomplete understanding of the data relationships. Writing the `SELECT` first and delaying the `UPDATE` forces clarity before risk is introduced.
+
+This pattern works equally well for configuration changes, security fixes, and integration corrections where reversibility matters more than speed.
+
+When a fix affects millions of rows rather than a targeted subset, see [Changing Large Volumes of Production Data Without an Outage](/patterns/large-data-changes-without-outage). For keeping a lasting record of who changed what and why, see [Designing Audit Trails That Help Investigation](/patterns/audit-trails-for-investigation).
+
+<style is:global>{`
+  .jargon {
+    position: relative;
+    text-decoration: underline;
+    text-decoration-style: dotted;
+    text-decoration-color: var(--accent, #0ea5e9);
+    text-decoration-thickness: 2px;
+    text-underline-offset: 3px;
+    cursor: help;
+  }
+
+  .jargon::after {
+    content: attr(data-tooltip);
+    position: absolute;
+    bottom: 100%;
+    left: 50%;
+    transform: translateX(-50%) translateY(-8px);
+    padding: 0.625rem 0.875rem;
+    background: var(--surface-elevated, #2a2a2a);
+    color: var(--text-primary, #fff);
+    border: 1px solid var(--border, #444);
+    border-radius: 0.375rem;
+    font-size: 0.875rem;
+    line-height: 1.5;
+    white-space: normal;
+    max-width: 400px;
+    min-width: 200px;
+    width: max-content;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.2s ease;
+    z-index: 1000;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  }
+
+  .jargon:hover::after {
+    opacity: 1;
+  }
+
+  @media (max-width: 768px) {
+    .jargon::after {
+      left: 0;
+      transform: translateX(0) translateY(-8px);
+      max-width: 280px;
+      min-width: 180px;
+    }
+  }
+`}</style>

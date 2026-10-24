@@ -1,0 +1,232 @@
+---
+layout: ../../layouts/ContentLayout.astro
+title: "Why Status Tables Fail Operations Teams"
+description: "Why simple status fields rarely communicate system state clearly, and how staged models improve operational clarity."
+tags: ['operations', 'ux', 'pipelines', 'observability']
+updated: "2026-02-12"
+---
+
+## Problem
+
+Systems often expose a single status field that technically describes processing, but does not help <span class="jargon" data-tooltip="People who monitor, troubleshoot, and maintain running systems">operational users</span> understand what is happening or what action is required.
+
+## Context
+
+Operational systems, <span class="jargon" data-tooltip="Automated workflows that move and transform data between systems">integration pipelines</span>, and background processes where users need to diagnose problems rather than simply view data.
+
+## Solution
+
+Many operational systems use a single status column to describe processing state. Examples include values such as `Processing`, `Complete`, or `Failed`.
+
+While this is technically correct, it rarely answers the questions operational users actually have:
+
+- What is the system doing right now?
+- Where did it fail?
+- Can this be <span class="jargon" data-tooltip="Attempting a failed operation again, often after fixing the cause">retried</span> safely?
+- Does this need intervention?
+
+A more effective approach is to model processing as a sequence of stages rather than a single status.
+
+<div class="comparison">
+  <div class="comparison-item bad">
+    <div class="comparison-label">❌ Single Status</div>
+    <pre><code>Status = Processing</code></pre>
+  </div>
+  <div class="comparison-item good">
+    <div class="comparison-label">✓ Staged Model</div>
+    <ol class="stage-list">
+      <li>Export detected</li>
+      <li>Retrieved</li>
+      <li>Parsed</li>
+      <li>Validated</li>
+      <li>Matched</li>
+      <li>Queued</li>
+      <li>Posted</li>
+    </ol>
+  </div>
+</div>
+
+Each stage represents a completed responsibility rather than a general condition.
+
+### Separate progress from outcome
+
+A common mistake is mixing progress and outcome into one field. For example:
+
+```text
+Status = Failed
+```
+
+This does not explain whether failure occurred during parsing, validation, or posting.
+
+A <span class="jargon" data-tooltip="Breaking processing into discrete sequential steps with clear boundaries">staged model</span> allows the system to express both:
+
+- current stage
+- outcome of that stage
+
+This makes failure location immediately visible.
+
+### Design for investigation, not display
+
+Operational users are rarely interested in whether something is technically complete. They need to know where attention is required.
+
+Useful operational views typically answer:
+
+- what is waiting
+- what is stuck
+- what failed recently
+- what can be retried safely
+
+This shifts the interface from reporting status to supporting decision-making.
+
+Whether something can be retried safely depends on how the job was built. See [Designing Integration Jobs That Are Safe to Rerun](/patterns/integration-jobs-safe-to-rerun), and [Retry, Back Off, Give Up](/patterns/handling-unreliable-external-apis) for a needs-attention state for items that have run out of retries.
+
+### Avoid artificial progress indicators
+
+Animations and progress bars often imply certainty that does not exist in <span class="jargon" data-tooltip="Systems where operations happen independently without waiting for each other">asynchronous systems</span>. A pipeline may pause for external reasons or await manual review.
+
+Showing discrete completed stages is usually clearer than showing percentage progress.
+
+## Trade-offs
+
+A staged model introduces additional state management and requires clearer definitions of responsibility between stages.
+
+Developers must also avoid creating too many stages, which can make systems harder to understand rather than easier. Each stage should represent a meaningful boundary where validation or responsibility changes.
+
+The benefit is improved <span class="jargon" data-tooltip="The ability to understand system state through logs, metrics, and visible status">observability</span> and significantly faster diagnosis when issues occur.
+
+## Checks
+
+When reviewing an operational screen or pipeline:
+
+- confirm users can identify where processing stopped
+- ensure failures identify a stage, not just an outcome
+- verify retries restart from the correct stage
+- confirm users can distinguish waiting from failing
+- test whether a new team member can understand the system state without explanation
+
+If interpretation requires <span class="jargon" data-tooltip="Undocumented knowledge that only long-time team members possess">tribal knowledge</span>, the status model is likely insufficient.
+
+## Notes
+
+Status tables often evolve from simple success or failure indicators into overloaded fields that attempt to describe multiple concepts at once.
+
+Separating processing into stages mirrors how systems actually work and reduces ambiguity for both developers and operational users.
+
+Clear system state reduces support effort more effectively than additional logging or documentation.
+
+The same principle applies to history as well as current state. See [Designing Audit Trails That Help Investigation](/patterns/audit-trails-for-investigation).
+
+<style is:global>{`
+  .jargon {
+    position: relative;
+    text-decoration: underline;
+    text-decoration-style: dotted;
+    text-decoration-color: var(--accent, #0ea5e9);
+    text-decoration-thickness: 2px;
+    text-underline-offset: 3px;
+    cursor: help;
+  }
+
+  .jargon::after {
+    content: attr(data-tooltip);
+    position: absolute;
+    bottom: 100%;
+    left: 50%;
+    transform: translateX(-50%) translateY(-8px);
+    padding: 0.625rem 0.875rem;
+    background: var(--surface-elevated, #2a2a2a);
+    color: var(--text-primary, #fff);
+    border: 1px solid var(--border, #444);
+    border-radius: 0.375rem;
+    font-size: 0.875rem;
+    line-height: 1.5;
+    white-space: normal;
+    max-width: 400px;
+    min-width: 200px;
+    width: max-content;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.2s ease;
+    z-index: 1000;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  }
+
+  .jargon:hover::after {
+    opacity: 1;
+  }
+
+  @media (max-width: 768px) {
+    .jargon::after {
+      left: 0;
+      transform: translateX(0) translateY(-8px);
+      max-width: 280px;
+      min-width: 180px;
+    }
+  }
+
+  .stage-list {
+    list-style: none;
+    padding-left: 0;
+    counter-reset: stage-counter;
+  }
+
+  .stage-list li {
+    counter-increment: stage-counter;
+    padding-left: 2.5rem;
+    position: relative;
+    margin-bottom: 0.5rem;
+  }
+
+  .stage-list li::before {
+    content: counter(stage-counter);
+    position: absolute;
+    left: 0;
+    width: 1.75rem;
+    height: 1.75rem;
+    background: var(--accent, #0ea5e9);
+    color: var(--background, #000);
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 600;
+    font-size: 0.875rem;
+  }
+
+  .comparison {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1.5rem;
+    margin: 1.5rem 0;
+  }
+
+  .comparison-item {
+    padding: 1rem;
+    background: var(--surface, #1a1a1a);
+    border: 1px solid var(--border, #333);
+    border-radius: 0.5rem;
+  }
+
+  .comparison-label {
+    font-weight: 600;
+    font-size: 0.875rem;
+    color: var(--text-secondary);
+    margin-bottom: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+
+  .bad {
+    border-left: 3px solid #ef4444;
+  }
+
+  .good {
+    border-left: 3px solid #22c55e;
+  }
+
+  @media (max-width: 768px) {
+    .comparison {
+      grid-template-columns: 1fr;
+    }
+  }
+`}</style>

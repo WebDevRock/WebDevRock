@@ -1,0 +1,289 @@
+---
+layout: ../../layouts/ContentLayout.astro
+title: "Building Your Own AI Agent System"
+description: "A practical walkthrough of setting up local LLMs, connecting tools, and running agents on a schedule. Based on what I actually use, not theoretical architecture."
+tags: [ai, agents, ollama, local-llm, automation, intermediate]
+level: beginner
+updated: "2026-06-21"
+---
+
+## What We're Building
+
+An agent system that runs on your own hardware, uses local LLMs for sensitive data, and can call tools to read files, search the web, and write output. Scheduled with cron, coordinated with simple routing.
+
+This is not Hermes-level complexity. This is the version you build in an afternoon.
+
+## Prerequisites
+
+- A machine with Python 3.10+
+- Optional but recommended: a GPU with 6GB+ VRAM for faster local inference
+- If no GPU: expect 7B parameter models to run slowly on CPU. Still usable for text tasks.
+
+## Step 1: Local LLM with Ollama
+
+Ollama is the simplest way to run local models. Install it, pull a model, and you have an API endpoint on localhost.
+
+```bash
+# Install Ollama (macOS/Linux — Windows has an installer)
+curl -fsSL https://ollama.com/install.sh | sh
+
+# Pull a 7B parameter model — good balance of capability and speed
+ollama pull llama3:7b
+
+# Start the server (runs in background)
+ollama serve
+```
+
+Test it:
+
+```bash
+curl http://localhost:11434/api/generate -d '{
+  "model": "llama3:7b",
+  "prompt": "Summarise the concept of AI agents in one sentence.",
+  "stream": false
+}'
+```
+
+Response:
+
+```json
+{"response": "AI agents are autonomous software systems that can perceive, reason, and act to achieve specific goals."}
+```
+
+For coding tasks, try a model trained on code: `codellama` or `mistral:7b`. For general reasoning, `llama3` or `qwen:7b` are solid.
+
+## Step 2: Agent Script Structure
+
+Every agent I write follows the same pattern:
+
+```python
+# agent_template.py
+import json
+import requests
+import os
+from datetime import datetime
+
+OLLAMA_URL = "http://localhost:11434/api/generate"
+MODEL = "llama3:7b"
+
+MEMORY_FILE = "agent_memory.json"
+
+def load_memory():
+    if os.path.exists(MEMORY_FILE):
+        with open(MEMORY_FILE, 'r') as f:
+            return json.load(f)
+    return {}
+
+def save_memory(memory):
+    with open(MEMORY_FILE, 'w') as f:
+        json.dump(memory, f, indent=2)
+
+def call_llm(prompt, temperature=0.7):
+    response = requests.post(OLLAMA_URL, json={
+        "model": MODEL,
+        "prompt": prompt,
+        "stream": False,
+        "options": {"temperature": temperature}
+    })
+    return response.json()["response"]
+
+def main():
+    memory = load_memory()
+
+    # Agent logic goes here
+    # 1. Read inputs (files, APIs, user queries)
+    # 2. Build prompt with context
+    # 3. Call LLM for reasoning
+    # 4. Act on response (write file, send message, etc.)
+    # 5. Update memory
+
+    save_memory(memory)
+
+if __name__ == "__main__":
+    main()
+```
+
+This template gives you: memory persistence, LLM access, and a clean structure. Copy it for each new agent.
+
+## Step 3: Add a Tool
+
+A tool is just a function the agent can call. Here's a web search tool using DuckDuckGo's API (no key required):
+
+```python
+import requests
+from urllib.parse import quote
+
+def web_search(query, max_results=5):
+    """Search the web and return top results."""
+    url = f"https://html.duckduckgo.com/html/?q={quote(query)}"
+    response = requests.get(url, headers={"User-Agent": "Agent/1.0"})
+    # Parse results... (simplified — use BeautifulSoup in production)
+    return ["Result 1...", "Result 2..."]
+
+def read_file(filepath):
+    """Read a file's contents."""
+    with open(filepath, 'r') as f:
+        return f.read()
+
+def write_file(filepath, content):
+    """Write content to a file."""
+    with open(filepath, 'w') as f:
+        f.write(content)
+
+# Register tools for the agent
+TOOLS = {
+    "web_search": web_search,
+    "read_file": read_file,
+    "write_file": write_file
+}
+```
+
+For the agent to use tools, you need to tell it what tools exist and how to call them. Two approaches:
+
+**Simple approach**: Include tool descriptions in the system prompt.
+
+```python
+SYSTEM_PROMPT = """You are a research agent. Available tools:
+- web_search(query): Search the web for information
+- read_file(path): Read a file's contents
+- write_file(path, content): Write content to a file
+
+When you need to use a tool, respond with: TOOL: tool_name(arguments)
+After receiving the result, continue reasoning."""
+```
+
+**Better approach**: Use a model that supports function calling. Llama 3.1, Mistral, and Qwen all support this. The model outputs structured JSON specifying which tool to call and with what arguments.
+
+## Step 4: Schedule with Cron
+
+On Linux/macOS, add to crontab:
+
+```bash
+# Edit crontab
+crontab -e
+
+# Run research agent at 8 AM daily
+0 8 * * * /usr/bin/python3 /path/to/agent.py >> /path/to/agent.log 2>&1
+
+# Run content agent every Tuesday and Thursday at 10 AM
+0 10 * * 2,4 /usr/bin/python3 /path/to/content_agent.py >> /path/to/content.log 2>&1
+```
+
+On Windows, use Task Scheduler or a cron-like tool. Git Bash includes cron, or use WSL for full Linux compatibility.
+
+## Step 5: Memory That Actually Works
+
+Simple JSON files are enough for most agents. For more structure, use SQLite:
+
+```python
+import sqlite3
+
+def init_db():
+    conn = sqlite3.connect('agent.db')
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS interactions (
+            id INTEGER PRIMARY KEY,
+            agent TEXT NOT NULL,
+            timestamp TEXT NOT NULL,
+            input TEXT,
+            output TEXT,
+            approved INTEGER DEFAULT 0
+        )
+    ''')
+    conn.commit()
+    conn.close()
+
+def log_interaction(agent, input_text, output_text):
+    conn = sqlite3.connect('agent.db')
+    conn.execute(
+        'INSERT INTO interactions (agent, timestamp, input, output) VALUES (?, ?, ?, ?)',
+        (agent, datetime.now().isoformat(), input_text, output_text)
+    )
+    conn.commit()
+    conn.close()
+```
+
+This lets you query history, find patterns in what the agent does well or poorly, and build a feedback loop.
+
+## A Complete Working Example
+
+This agent reads your task list, identifies overdue items, drafts a morning summary, and writes it to a file:
+
+```python
+#!/usr/bin/env python3
+# morning_briefing.py
+import json
+import requests
+from datetime import datetime
+
+OLLAMA_URL = "http://localhost:11434/api/generate"
+MODEL = "llama3:7b"
+
+def call_llm(prompt):
+    r = requests.post(OLLAMA_URL, json={
+        "model": MODEL, "prompt": prompt, "stream": False,
+        "options": {"temperature": 0.3}
+    })
+    return r.json()["response"]
+
+def main():
+    # Read tasks
+    with open('tasks.json', 'r') as f:
+        tasks = json.load(f)
+
+    # Build context
+    task_list = "\n".join(
+        f"- {t['title']} | status: {t['status']} | due: {t.get('due', 'none')} | priority: {t.get('priority', 'normal')}"
+        for t in tasks[:15]
+    )
+
+    prompt = f"""You are a productivity assistant. Given these tasks, write a brief morning briefing (3-5 sentences).
+Focus on what's overdue, what's due today, and the top priority.
+Be direct. No fluff.
+
+Tasks:
+{task_list}
+
+Briefing:"""
+
+    briefing = call_llm(prompt)
+
+    # Write to file
+    filename = f"briefing_{datetime.now().strftime('%Y%m%d')}.txt"
+    with open(filename, 'w') as f:
+        f.write(f"MORNING BRIEFING — {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n")
+        f.write(briefing)
+
+    print(f"Briefing written to {filename}")
+
+if __name__ == "__main__":
+    main()
+```
+
+Schedule it with cron for 8 AM. Every morning you get a text file with a briefing generated from your actual task list.
+
+## Hardware Reality Check
+
+| Model Size | VRAM Needed | CPU-Only Speed | Use Case |
+|-----------|------------|---------------|----------|
+| 3B | 2GB | Usable | Simple classification, short summaries |
+| 7B | 4-6GB | Slow but works | General reasoning, drafting, most agents |
+| 13B | 8-10GB | Very slow | Better reasoning, longer context |
+| 70B | 40GB+ | Not practical | Best quality, requires serious hardware |
+
+For most personal agent workflows, 7B is the sweet spot. If your hardware is limited, use cloud LLMs for complex tasks and save local models for high-volume or sensitive work.
+
+## Security and Privacy
+
+Local LLMs keep your data on your machine. But:
+- Web search tools leak your queries to the search engine
+- API calls to cloud services (if you mix them) send data externally
+- Agent logs may contain sensitive information — secure the log files
+
+If privacy is paramount, run everything local: the LLM, the tools, the storage. No external API calls.
+
+## What's Next
+
+- [AI Agents: What They Are and How to Use Them](/ai/what-are-ai-agents) — concepts and common patterns
+- [LLM Productivity Workflows](/ai/llm-productivity-workflows) — daily patterns for work and life organisation
+- [Architecting Multi-Agent Systems](/ai/multi-agent-architecture) — when one agent isn't enough

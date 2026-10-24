@@ -1,0 +1,167 @@
+---
+// Retry backoff schedule calculator
+import '../../styles/tools.css';
+---
+
+<div class="tool" data-tool="retry-schedule" data-pagefind-ignore>
+  <div class="tool-row">
+    <label>
+      Retries
+      <input type="number" data-field="retries" value="3" min="0" max="50" step="1" />
+    </label>
+    <label>
+      Units
+      <select data-field="unit">
+        <option value="1">milliseconds</option>
+        <option value="1000">seconds</option>
+        <option value="60000">minutes</option>
+      </select>
+    </label>
+    <label>
+      Base delay
+      <input type="number" data-field="base" value="500" min="0" step="any" />
+    </label>
+    <label>
+      Multiplier
+      <input type="number" data-field="multiplier" value="2" min="1" step="any" />
+    </label>
+  </div>
+
+  <div class="tool-row">
+    <label>
+      Maximum delay
+      <input type="number" data-field="max" value="10000" min="0" step="any" />
+    </label>
+    <label>
+      Timeout per attempt (0 for none)
+      <input type="number" data-field="timeout" value="10000" min="0" step="any" />
+    </label>
+    <label>
+      Jitter
+      <select data-field="jitter">
+        <option value="full">Full (0 to delay)</option>
+        <option value="equal">Equal (½ to delay)</option>
+        <option value="none">None (fixed)</option>
+      </select>
+    </label>
+  </div>
+
+  <div class="tool-actions">
+    <button type="button" class="primary" data-field="calculate">Calculate</button>
+    <button type="button" data-field="copy">Copy fetchWithRetry options</button>
+  </div>
+
+  <p class="tool-status" data-field="status" aria-live="polite"></p>
+
+  <div class="tool-table-wrap">
+    <table class="tool-table" data-field="table" hidden>
+      <thead>
+        <tr>
+          <th scope="col">Attempt</th>
+          <th scope="col">Wait before it</th>
+          <th scope="col">Starts after (earliest)</th>
+          <th scope="col">Starts after (latest)</th>
+        </tr>
+      </thead>
+      <tbody data-field="rows"></tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+  import { trackToolUse } from '../../scripts/analytics';
+  import { field, setStatus, wireCopyButton } from '../../scripts/tool-ui';
+  import { wireToolState } from '../../scripts/tool-state';
+  import {
+    buildSchedule,
+    formatDuration,
+    toSnippetOptions,
+    type Jitter,
+    type RetryScheduleOptions,
+  } from '../../scripts/tools/retry-schedule';
+
+  const root = document.querySelector<HTMLElement>('[data-tool="retry-schedule"]');
+
+  if (root) {
+    const num = (name: string) => Number(field<HTMLInputElement>(root, name).value);
+    const jitter = field<HTMLSelectElement>(root, 'jitter');
+    const status = field<HTMLElement>(root, 'status');
+    const table = field<HTMLTableElement>(root, 'table');
+    const body = field<HTMLTableSectionElement>(root, 'rows');
+
+    const readOptions = (): RetryScheduleOptions => {
+      const unit = num('unit');
+      return {
+        retries: num('retries'),
+        baseDelayMs: num('base') * unit,
+        multiplier: num('multiplier'),
+        maxDelayMs: num('max') * unit,
+        timeoutMs: num('timeout') * unit,
+        jitter: jitter.value as Jitter,
+      };
+    };
+
+    const cell = (text: string, className = 'num') => {
+      const td = document.createElement('td');
+      td.className = className;
+      td.textContent = text;
+      return td;
+    };
+
+    const render = (track: boolean) => {
+      try {
+        const options = readOptions();
+        const schedule = buildSchedule(options);
+
+        body.replaceChildren(
+          ...schedule.rows.map((row) => {
+            const tr = document.createElement('tr');
+            const wait =
+              row.attempt === 1
+                ? '—'
+                : row.minDelayMs === row.maxDelayMs
+                  ? formatDuration(row.maxDelayMs)
+                  : `${formatDuration(row.minDelayMs)} to ${formatDuration(row.maxDelayMs)}`;
+            tr.append(
+              cell(row.attempt === 1 ? '1 (first try)' : String(row.attempt)),
+              cell(wait),
+              cell(formatDuration(row.earliestStartMs)),
+              cell(formatDuration(row.latestStartMs)),
+            );
+            return tr;
+          }),
+        );
+        table.hidden = false;
+
+        setStatus(
+          status,
+          `${schedule.rows.length} attempts. Gives up after ${formatDuration(schedule.bestCaseMs)} at the earliest, ` +
+            `${formatDuration(schedule.worstCaseMs)} at the latest (every attempt timing out, longest waits).`,
+        );
+        if (track) trackToolUse('retry-schedule', 'calculate');
+      } catch (err) {
+        table.hidden = true;
+        setStatus(status, (err as Error).message, 'error');
+      }
+    };
+
+    field<HTMLButtonElement>(root, 'calculate').addEventListener('click', () => render(true));
+
+    wireCopyButton(
+      field<HTMLButtonElement>(root, 'copy'),
+      () => {
+        try {
+          return toSnippetOptions(readOptions());
+        } catch {
+          return '';
+        }
+      },
+      'retry-schedule',
+    );
+
+    render(false); // show the defaults without counting a use
+
+    // Share links, and restoring inputs from a link (after the handlers above, so the result can be shown)
+    wireToolState(root, 'retry-schedule', status);
+  }
+</script>

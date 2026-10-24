@@ -1,0 +1,92 @@
+---
+// List to SQL converter: pasted ids (and values) to IN list, OPENJSON or #temp table
+import '../../styles/tools.css';
+---
+
+<div class="tool" data-tool="list-to-sql" data-pagefind-ignore>
+  <label>
+    Values, one per line (paste a column from Excel, or id and value separated by a tab or comma)
+    <textarea data-field="input" spellcheck="false" placeholder={'123\n456\n789'}></textarea>
+  </label>
+
+  <div class="tool-row">
+    <label>
+      Output
+      <select data-field="format">
+        <option value="temp">#temp table (CREATE + INSERT)</option>
+        <option value="in">IN (...) list</option>
+        <option value="json">JSON for OPENJSON</option>
+      </select>
+    </label>
+    <label class="tool-check">
+      <input type="checkbox" data-field="header" />
+      First row is column names
+    </label>
+    <label class="tool-check">
+      <input type="checkbox" data-field="dedupe" checked />
+      Remove repeated ids
+    </label>
+  </div>
+
+  <div class="tool-actions">
+    <button type="button" class="primary" data-field="generate">Generate SQL</button>
+    <button type="button" data-field="copy">Copy</button>
+  </div>
+
+  <p class="tool-status" data-field="status" aria-live="polite"></p>
+
+  <label>
+    SQL
+    <textarea data-field="output" readonly spellcheck="false"></textarea>
+  </label>
+</div>
+
+<script>
+  import { trackToolUse } from '../../scripts/analytics';
+  import { field, setStatus, wireCopyButton } from '../../scripts/tool-ui';
+  import { wireToolState } from '../../scripts/tool-state';
+  import { buildListSql, type ListFormat } from '../../scripts/tools/list-to-sql';
+
+  const root = document.querySelector<HTMLElement>('[data-tool="list-to-sql"]');
+
+  if (root) {
+    const input = field<HTMLTextAreaElement>(root, 'input');
+    const format = field<HTMLSelectElement>(root, 'format');
+    const header = field<HTMLInputElement>(root, 'header');
+    const dedupe = field<HTMLInputElement>(root, 'dedupe');
+    const output = field<HTMLTextAreaElement>(root, 'output');
+    const status = field<HTMLElement>(root, 'status');
+
+    field<HTMLButtonElement>(root, 'generate').addEventListener('click', () => {
+      try {
+        const result = buildListSql(input.value, {
+          format: format.value as ListFormat,
+          header: header.checked,
+          dedupe: dedupe.checked,
+        });
+        output.value = result.sql;
+
+        const notes = [`${result.rows} row${result.rows === 1 ? '' : 's'}`];
+        if (result.duplicates) notes.push(`${result.duplicates} repeated id${result.duplicates === 1 ? '' : 's'} removed`);
+        if (result.emptyValues) notes.push(`${result.emptyValues} empty value${result.emptyValues === 1 ? '' : 's'} set to NULL`);
+        if (result.conflicts.length) {
+          const sample = result.conflicts.slice(0, 5).join(', ');
+          notes.push(`ids with different values (first kept): ${sample}${result.conflicts.length > 5 ? '…' : ''}`);
+        }
+        if (format.value === 'in' && result.rows > 1000) notes.push('large IN lists are slow: consider the #temp table output');
+
+        const warn = result.conflicts.length > 0 || result.emptyValues > 0;
+        setStatus(status, notes.join(' · '), warn ? 'warn' : 'info');
+        trackToolUse('list-to-sql', format.value);
+      } catch (err) {
+        output.value = '';
+        setStatus(status, (err as Error).message, 'error');
+      }
+    });
+
+    wireCopyButton(field<HTMLButtonElement>(root, 'copy'), () => output.value, 'list-to-sql');
+
+    // Share links, and restoring inputs from a link (after the handlers above, so the result can be shown)
+    wireToolState(root, 'list-to-sql', status);
+  }
+</script>

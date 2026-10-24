@@ -1,0 +1,209 @@
+---
+// Built as dist/404.html; nginx serves it for any missing URL (error_page in ops/nginx/webdevrock.uk.conf).
+// The address bar still shows the missing URL, so the script reads it to pre-fill the search.
+import BaseLayout from '../layouts/BaseLayout.astro';
+import { SECTIONS, getContentPages } from '../lib/content';
+
+const pages = getContentPages();
+const countFor = (key: string) => pages.filter((p) => p.section === key).length;
+---
+
+<BaseLayout title="Page not found" description="This page doesn't exist on WebDevRock." noindex>
+  <div class="not-found">
+    <section class="intro">
+      <p class="code" aria-hidden="true"><span class="prompt">$</span> GET <span data-missing-path>/this-page</span> <span class="status">404</span></p>
+      <h1>This page doesn't exist</h1>
+      <p class="lead">
+        It may have moved, or the link may be mistyped. Try a search, or pick up from one of the sections below.
+      </p>
+    </section>
+
+    <section class="search-block" aria-labelledby="nf-search-heading">
+      <h2 id="nf-search-heading" class="block-title">Search the site</h2>
+      <div id="not-found-search" class="search-ui">
+        <noscript><p class="search-unavailable">Search needs JavaScript. You can also browse by <a href="/tags/">tag</a>.</p></noscript>
+      </div>
+    </section>
+
+    <section aria-labelledby="nf-sections-heading">
+      <h2 id="nf-sections-heading" class="block-title">Or browse a section</h2>
+      <div class="section-grid">
+        {SECTIONS.map((section) => (
+          <a
+            class="section-tile"
+            href={`/${section.key}/`}
+            style={`--accent: ${section.accent}`}
+            data-umami-event="not-found-click"
+            data-umami-event-target={`section-${section.key}`}
+          >
+            <span class="tile-glyph" aria-hidden="true">{section.glyph}</span>
+            <span class="tile-name">{section.name}</span>
+            <span class="tile-count">{countFor(section.key)} {countFor(section.key) === 1 ? 'page' : 'pages'}</span>
+          </a>
+        ))}
+      </div>
+      <p class="more-links">
+        <a href="/" data-umami-event="not-found-click" data-umami-event-target="home">Home</a>
+        <a href="/tags/" data-umami-event="not-found-click" data-umami-event-target="tags">All tags</a>
+        <a href="/#start-here" data-umami-event="not-found-click" data-umami-event-target="start-here">Learning paths</a>
+      </p>
+    </section>
+  </div>
+</BaseLayout>
+
+<script>
+  import { trackEvent } from '../scripts/analytics';
+  import { mountSearch } from '../scripts/search';
+
+  const path = location.pathname;
+  const shown = document.querySelector('[data-missing-path]');
+  if (shown) shown.textContent = path.length > 60 ? `${path.slice(0, 57)}...` : path;
+
+  // Words from the missing URL make a reasonable first search, e.g. /patterns/reversable-data-fix -> "reversable data fix"
+  const ignore = new Set(['patterns', 'snippets', 'tools', 'ai', 'experiments', 'tags', 'index', 'html', 'md']);
+  const term = decodeURIComponent(path)
+    .split(/[/\-_.\s]+/)
+    .filter((word) => word && !ignore.has(word.toLowerCase()))
+    .join(' ')
+    .slice(0, 80);
+
+  trackEvent('not-found', { path, referrer: document.referrer ? new URL(document.referrer).hostname : 'direct' });
+  mountSearch('#not-found-search', 'not-found', term);
+</script>
+
+<style>
+  .not-found {
+    max-width: 900px;
+    margin: 0 auto;
+    padding-top: 3rem;
+  }
+
+  .intro {
+    margin-bottom: 3rem;
+  }
+
+  .code {
+    display: inline-flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    max-width: 100%;
+    margin-bottom: 1.5rem;
+    padding: 0.5rem 0.875rem;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-subtle);
+    border-radius: 8px;
+    font-family: var(--font-mono);
+    font-size: 0.875rem;
+    color: var(--text-secondary);
+    overflow-wrap: anywhere;
+  }
+
+  .prompt {
+    color: var(--accent-lime);
+  }
+
+  .status {
+    color: var(--accent-coral);
+    font-weight: 600;
+  }
+
+  h1 {
+    font-family: var(--font-serif);
+    font-size: clamp(2.25rem, 6vw, 3.5rem);
+    font-weight: 600;
+    line-height: 1.1;
+    margin-bottom: 1rem;
+    background: var(--gradient-1);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    width: fit-content;
+  }
+
+  .lead {
+    color: var(--text-secondary);
+    font-size: 1.125rem;
+    max-width: 600px;
+  }
+
+  .block-title {
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-muted);
+    margin-bottom: 1rem;
+  }
+
+  .search-block {
+    margin-bottom: 3rem;
+  }
+
+  .search-block a {
+    color: var(--link);
+  }
+
+  .section-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+    gap: 0.75rem;
+  }
+
+  .section-tile {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    padding: 1rem;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-subtle);
+    border-top: 2px solid var(--accent);
+    border-radius: 10px;
+    color: var(--text-primary);
+    text-decoration: none;
+    transition: border-color 0.2s ease, transform 0.2s ease;
+  }
+
+  .section-tile:hover,
+  .section-tile:focus-visible {
+    border-color: var(--accent);
+    transform: translateY(-2px);
+  }
+
+  .tile-glyph {
+    font-family: var(--font-mono);
+    font-weight: 600;
+    color: var(--accent);
+  }
+
+  .tile-name {
+    font-weight: 600;
+  }
+
+  .tile-count {
+    font-size: 0.8rem;
+    color: var(--text-muted);
+  }
+
+  .more-links {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1.5rem;
+    margin-top: 1.5rem;
+  }
+
+  .more-links a {
+    color: var(--link);
+    text-decoration: none;
+  }
+
+  .more-links a:hover {
+    text-decoration: underline;
+  }
+
+  @media (max-width: 768px) {
+    .not-found {
+      padding-top: 1.5rem;
+    }
+  }
+</style>

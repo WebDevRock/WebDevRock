@@ -1,0 +1,23 @@
+---
+layout: ../../layouts/ContentLayout.astro
+title: "Timestamp Converter for Integrations"
+description: "Convert between Unix timestamps, ISO 8601, .NET ticks, Microsoft JSON dates, HTTP dates, and SQL Server literals."
+tags: [integrations, sql-server, dates, tool]
+updated: "2026-10-24"
+---
+
+import TimestampConverter from '../../components/tools/TimestampConverter.astro';
+
+Paste a timestamp from a payload, log, or database and see it in every format the systems around it might use. Everything runs in your browser; nothing is sent anywhere.
+
+<TimestampConverter />
+
+## Notes
+
+- **Detection:** whole numbers are read by length: up to 11 digits as Unix seconds, 12 to 14 as milliseconds, 15 to 16 as microseconds, 17 to 18 as .NET ticks, and 19 as nanoseconds. Choose the format yourself if the guess is wrong, for example for dates far in the past or future.
+- **Dates without an offset** such as `2026-10-24 14:03:05` are ambiguous. Integrations usually exchange UTC, so that is the default; switch to local time if the value came from a local clock.
+- **Microsoft JSON dates** like `/Date(1761314585000)/` come from older .NET services. The number is always UTC milliseconds; any offset after it only describes the sender's time zone.
+- **Precision** is milliseconds. Microseconds, nanoseconds, and ticks are truncated.
+- **SQL Server output** is a literal you can paste into a query. `DATEADD` only accepts an `INT`, so very large Unix values are split into days and seconds.
+
+Timestamps without a clear time zone cause many reconciliation problems. Store UTC, record the offset when it matters, and validate dates before they move downstream, as described in [Designing Integration Pipelines That Fail Safely](/patterns/integration-pipelines-fail-safely).

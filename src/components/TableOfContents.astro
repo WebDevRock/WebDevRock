@@ -1,0 +1,209 @@
+---
+// "On this page" contents for long pages: a sticky sidebar on wide screens, a collapsed box above the content otherwise.
+// Headings come from MDX (Astro.props.headings in the layout); ids are added by Astro.
+interface Props {
+  headings: { depth: number; slug: string; text: string }[];
+}
+
+const headings = Astro.props.headings.filter((h) => h.depth === 2 || h.depth === 3);
+const sectionCount = headings.filter((h) => h.depth === 2).length;
+---
+
+{headings.length > 0 && (
+  <nav class="toc" aria-labelledby="toc-title" data-pagefind-ignore>
+    <details data-toc>
+      <summary>
+        <span id="toc-title">On this page</span>
+        <span class="toc-count">{sectionCount} sections</span>
+      </summary>
+      <ol>
+        {headings.map((heading) => (
+          <li class={`depth-${heading.depth}`}>
+            <a href={`#${heading.slug}`} data-umami-event="toc-click" data-umami-event-target={heading.slug}>{heading.text}</a>
+          </li>
+        ))}
+      </ol>
+    </details>
+  </nav>
+)}
+
+<script>
+  const details = document.querySelector<HTMLDetailsElement>('[data-toc]');
+
+  if (details) {
+    // Always open as a sidebar; collapsed by default above the content on smaller screens
+    const wide = window.matchMedia('(min-width: 1200px)');
+    const sync = () => {
+      details.open = wide.matches;
+    };
+    sync();
+    wide.addEventListener('change', sync);
+
+    // Highlight the section being read: the last heading that has scrolled past the top of the screen
+    const links = [...details.querySelectorAll<HTMLAnchorElement>('a[href^="#"]')];
+    const targets = links
+      .map((link) => document.getElementById(decodeURIComponent(link.hash.slice(1))))
+      .filter((el): el is HTMLElement => el !== null);
+
+    // Scroll position at which each heading becomes current. Headings near the end of the page can never
+    // reach the top of the screen, so those are spread evenly over the last half screen of scrolling:
+    // the last one becomes current at the very bottom of the page.
+    const activations = () => {
+      const offset = 140; // a little below the heading scroll-margin-top in ContentLayout
+      const maxScroll = document.documentElement.scrollHeight - window.innerHeight;
+      const natural = targets.map((target) => target.getBoundingClientRect().top + window.scrollY - offset);
+
+      const firstUnreachable = natural.findIndex((position) => position > maxScroll);
+      if (firstUnreachable === -1) return natural;
+
+      const unreachable = natural.length - firstUnreachable;
+      const lastReachable = firstUnreachable > 0 ? natural[firstUnreachable - 1] : 0;
+      const start = Math.max(lastReachable, maxScroll - window.innerHeight / 2, 0);
+      return natural.map((position, i) =>
+        i < firstUnreachable ? position : start + ((maxScroll - start) * (i - firstUnreachable + 1)) / unreachable,
+      );
+    };
+
+    // A clicked link stays highlighted until the reader scrolls for themselves, since the page may not
+    // be able to scroll that heading to the top
+    let chosen: string | undefined;
+    let frame = 0;
+    const update = () => {
+      frame = 0;
+      const positions = activations();
+      let current = targets[0];
+      targets.forEach((target, i) => {
+        if (positions[i] <= window.scrollY + 1) current = target; // +1: fractional scroll positions at the bottom
+      });
+      const id = chosen ?? current?.id;
+      links.forEach((link) => {
+        if (link.hash.slice(1) === id) link.setAttribute('aria-current', 'true');
+        else link.removeAttribute('aria-current');
+      });
+    };
+
+    const schedule = () => {
+      frame ||= requestAnimationFrame(update);
+    };
+    window.addEventListener('scroll', schedule, { passive: true });
+    window.addEventListener('resize', schedule, { passive: true });
+    for (const type of ['wheel', 'touchstart', 'keydown']) {
+      window.addEventListener(type, () => (chosen = undefined), { passive: true });
+    }
+    update();
+
+    details.addEventListener('click', (event) => {
+      const link = (event.target as HTMLElement).closest<HTMLAnchorElement>('a[href^="#"]');
+      if (!link) return;
+      chosen = decodeURIComponent(link.hash.slice(1));
+      update();
+      // Collapse again after choosing a section on smaller screens
+      if (!wide.matches) details.open = false;
+    });
+  }
+</script>
+
+<style>
+  .toc {
+    margin-bottom: 2rem;
+    font-size: 0.875rem;
+  }
+
+  details {
+    background: var(--bg-surface);
+    border: 1px solid var(--border-subtle);
+    border-radius: 10px;
+  }
+
+  summary {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 1rem;
+    padding: 0.75rem 1rem;
+    cursor: pointer;
+    list-style: none;
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+  }
+
+  summary::-webkit-details-marker {
+    display: none;
+  }
+
+  summary::after {
+    content: '+';
+    color: var(--accent-coral);
+  }
+
+  details[open] summary::after {
+    content: '−';
+  }
+
+  .toc-count {
+    margin-left: auto;
+    color: var(--text-muted);
+  }
+
+  ol {
+    list-style: none;
+    padding: 0 0.5rem 0.75rem;
+  }
+
+  li a {
+    display: block;
+    padding: 0.3rem 0.5rem;
+    border-left: 2px solid var(--border);
+    color: var(--text-secondary);
+    text-decoration: none;
+    line-height: 1.4;
+    transition: color 0.2s ease, border-color 0.2s ease;
+  }
+
+  li.depth-3 a {
+    padding-left: 1.25rem;
+    font-size: 0.8125rem;
+    color: var(--text-muted);
+  }
+
+  li a:hover,
+  li a:focus-visible {
+    color: var(--text-primary);
+  }
+
+  li a[aria-current='true'] {
+    border-left-color: var(--accent-coral);
+    color: var(--text-primary);
+  }
+
+  /* Sidebar: the layout places .toc in its own column */
+  @media (min-width: 1200px) {
+    .toc {
+      position: sticky;
+      top: 6rem;
+      max-height: calc(100vh - 8rem);
+      overflow-y: auto;
+      margin-bottom: 0;
+    }
+
+    details {
+      background: none;
+      border: none;
+    }
+
+    summary {
+      padding: 0 0 0.75rem;
+      pointer-events: none;
+    }
+
+    summary::after,
+    .toc-count {
+      display: none;
+    }
+
+    ol {
+      padding: 0;
+    }
+  }
+</style>

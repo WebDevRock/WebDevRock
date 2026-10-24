@@ -1,0 +1,163 @@
+---
+// "Was this useful?" at the end of each content page. Answers go to Umami only (see ops/umami/README.md):
+// `feedback` with useful = yes/no, then an optional `feedback-reason` after a "no". No free text is collected.
+// The answer is remembered in this browser so a reader isn't asked again and doesn't vote twice.
+const reasons = [
+  { key: 'did-not-work', label: "Didn't work for me" },
+  { key: 'hard-to-follow', label: 'Hard to follow' },
+  { key: 'out-of-date', label: 'Out of date' },
+  { key: 'missing-something', label: 'Missing something' },
+];
+---
+
+<section class="feedback" aria-labelledby="feedback-title" data-feedback hidden data-pagefind-ignore>
+  <div class="step" data-step="ask">
+    <p id="feedback-title" class="question">Was this useful?</p>
+    <div class="buttons">
+      <button type="button" data-answer="yes"><span aria-hidden="true">↑</span> Yes</button>
+      <button type="button" data-answer="no"><span aria-hidden="true">↓</span> No</button>
+    </div>
+  </div>
+
+  <div class="step" data-step="reason" hidden>
+    <p class="question">Thanks. What was the problem?</p>
+    <div class="buttons">
+      {reasons.map((reason) => (
+        <button type="button" data-reason={reason.key}>{reason.label}</button>
+      ))}
+    </div>
+  </div>
+
+  <p class="step thanks" data-step="thanks" role="status" hidden></p>
+</section>
+
+<script>
+  import { trackEvent } from '../scripts/analytics';
+
+  const root = document.querySelector<HTMLElement>('[data-feedback]');
+
+  if (root) {
+    const page = location.pathname;
+    const storageKey = `feedback:${page}`;
+    const thanks = root.querySelector<HTMLElement>('[data-step="thanks"]')!;
+
+    const show = (step: string) => {
+      root.querySelectorAll<HTMLElement>('[data-step]').forEach((el) => (el.hidden = el.dataset.step !== step));
+    };
+
+    const finish = (message: string) => {
+      thanks.textContent = message;
+      show('thanks');
+    };
+
+    const remember = (value: string) => {
+      try {
+        localStorage.setItem(storageKey, value);
+      } catch {
+        // Private browsing or blocked storage: the reader may be asked again next time
+      }
+    };
+
+    let previous: string | null = null;
+    try {
+      previous = localStorage.getItem(storageKey);
+    } catch {
+      // As above
+    }
+
+    // Shown only with JavaScript, since the buttons need it
+    root.hidden = false;
+    if (previous) finish('Thanks for your feedback on this page.');
+
+    root.addEventListener('click', (event) => {
+      const button = (event.target as HTMLElement).closest<HTMLButtonElement>('button');
+      if (!button) return;
+
+      const answer = button.dataset.answer;
+      if (answer) {
+        trackEvent('feedback', { page, useful: answer });
+        remember(answer);
+        if (answer === 'yes') finish('Thanks, glad it helped.');
+        else {
+          show('reason');
+          root.querySelector<HTMLButtonElement>('[data-reason]')?.focus();
+        }
+        return;
+      }
+
+      const reason = button.dataset.reason;
+      if (reason) {
+        trackEvent('feedback-reason', { page, reason });
+        finish('Thanks, that helps decide what to improve.');
+      }
+    });
+  }
+</script>
+
+<style>
+  .feedback {
+    margin-top: 3rem;
+    padding: 1.25rem 1.5rem;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-subtle);
+    border-radius: 12px;
+  }
+
+  .step {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem 1.5rem;
+  }
+
+  .step[hidden] {
+    display: none;
+  }
+
+  .question {
+    font-weight: 600;
+  }
+
+  .buttons {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+
+  button {
+    padding: 0.45rem 0.9rem;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text-secondary);
+    font: inherit;
+    font-size: 0.875rem;
+    cursor: pointer;
+    transition: border-color 0.2s ease, color 0.2s ease;
+  }
+
+  button span {
+    font-family: var(--font-mono);
+  }
+
+  button:hover,
+  button:focus-visible {
+    color: var(--text-primary);
+    border-color: var(--accent-cyan);
+  }
+
+  [data-answer='yes']:hover,
+  [data-answer='yes']:focus-visible {
+    border-color: var(--accent-lime);
+  }
+
+  [data-answer='no']:hover,
+  [data-answer='no']:focus-visible {
+    border-color: var(--accent-coral);
+  }
+
+  .thanks {
+    color: var(--text-secondary);
+  }
+</style>

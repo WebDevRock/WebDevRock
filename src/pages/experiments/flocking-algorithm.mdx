@@ -1,0 +1,225 @@
+---
+layout: ../../layouts/ContentLayout.astro
+title: "Flocking Algorithm (Boids)"
+description: "Implementation of Craig Reynolds' Boids flocking simulation in Three.js."
+tags: [threejs, algorithm, simulation]
+updated: "2026-02-08"
+---
+
+import FlockingDemo from '../../components/FlockingDemo.astro';
+
+## Overview
+
+A 3D implementation of Craig Reynolds' Boids algorithm (1986) — a simulation of coordinated animal motion such as bird flocks and fish schools.
+
+Each boid (bird-oid) follows three simple rules:
+1. **Separation** — Avoid crowding neighbors
+2. **Alignment** — Steer towards average heading of neighbors
+3. **Cohesion** — Steer towards average position of neighbors
+
+## Demo
+
+<FlockingDemo />
+
+## How It Works
+
+### Boid Structure
+
+```javascript
+class Boid {
+  position = new THREE.Vector3();
+  velocity = new THREE.Vector3();
+  acceleration = new THREE.Vector3();
+  maxSpeed = 0.3;
+  maxForce = 0.05;
+  
+  constructor() {
+    // Random starting position and velocity
+    this.position.set(
+      Math.random() * 40 - 20,
+      Math.random() * 20 - 10,
+      Math.random() * 40 - 20
+    );
+    this.velocity.set(
+      Math.random() * 2 - 1,
+      Math.random() * 2 - 1,
+      Math.random() * 2 - 1
+    );
+  }
+}
+```
+
+### Separation
+
+Steer away from nearby boids to avoid collision.
+
+```javascript
+separation(boids) {
+  const perceptionRadius = 3;
+  const steering = new THREE.Vector3();
+  let total = 0;
+  
+  for (const other of boids) {
+    const distance = this.position.distanceTo(other.position);
+    if (other !== this && distance < perceptionRadius) {
+      const diff = new THREE.Vector3()
+        .subVectors(this.position, other.position);
+      diff.divideScalar(distance * distance); // Weight by distance
+      steering.add(diff);
+      total++;
+    }
+  }
+  
+  if (total > 0) {
+    steering.divideScalar(total);
+    steering.setLength(this.maxSpeed);
+    steering.sub(this.velocity);
+    steering.clampLength(0, this.maxForce);
+  }
+  
+  return steering;
+}
+```
+
+### Alignment
+
+Match velocity with nearby boids.
+
+```javascript
+align(boids) {
+  const perceptionRadius = 5;
+  const steering = new THREE.Vector3();
+  let total = 0;
+  
+  for (const other of boids) {
+    const distance = this.position.distanceTo(other.position);
+    if (other !== this && distance < perceptionRadius) {
+      steering.add(other.velocity);
+      total++;
+    }
+  }
+  
+  if (total > 0) {
+    steering.divideScalar(total); // Average velocity
+    steering.setLength(this.maxSpeed);
+    steering.sub(this.velocity);
+    steering.clampLength(0, this.maxForce);
+  }
+  
+  return steering;
+}
+```
+
+### Cohesion
+
+Steer towards the average position of nearby boids.
+
+```javascript
+cohesion(boids) {
+  const perceptionRadius = 5;
+  const steering = new THREE.Vector3();
+  let total = 0;
+  
+  for (const other of boids) {
+    const distance = this.position.distanceTo(other.position);
+    if (other !== this && distance < perceptionRadius) {
+      steering.add(other.position);
+      total++;
+    }
+  }
+  
+  if (total > 0) {
+    steering.divideScalar(total); // Center of mass
+    steering.sub(this.position); // Vector to center
+    steering.setLength(this.maxSpeed);
+    steering.sub(this.velocity);
+    steering.clampLength(0, this.maxForce);
+  }
+  
+  return steering;
+}
+```
+
+### Combining Forces
+
+```javascript
+flock(boids) {
+  const alignment = this.align(boids);
+  const cohesion = this.cohesion(boids);
+  const separation = this.separation(boids);
+  
+  // Weight the forces (tune these for different behaviors)
+  alignment.multiplyScalar(1.0);
+  cohesion.multiplyScalar(1.0);
+  separation.multiplyScalar(1.5); // Stronger to avoid collisions
+  
+  this.acceleration.add(alignment);
+  this.acceleration.add(cohesion);
+  this.acceleration.add(separation);
+}
+```
+
+### Update Loop
+
+```javascript
+update() {
+  // Apply acceleration to velocity
+  this.velocity.add(this.acceleration);
+  this.velocity.clampLength(0, this.maxSpeed);
+  
+  // Apply velocity to position
+  this.position.add(this.velocity);
+  
+  // Reset acceleration for next frame
+  this.acceleration.multiplyScalar(0);
+  
+  // Update mesh position and orientation
+  this.mesh.position.copy(this.position);
+  
+  // Point mesh in direction of movement
+  if (this.velocity.length() > 0) {
+    const direction = this.velocity.clone().normalize();
+    this.mesh.quaternion.setFromUnitVectors(
+      new THREE.Vector3(0, 0, 1),
+      direction
+    );
+  }
+}
+```
+
+## Performance Notes
+
+- Perception checks are O(n²) — for large flocks, use spatial partitioning (octree, grid)
+- Current implementation handles ~100 boids smoothly
+- Consider using instanced meshes for better performance with 1000+ boids
+
+## Tuning Parameters
+
+```javascript
+// Perception radii
+separationRadius = 3;   // Smaller = only avoid very close neighbors
+alignmentRadius = 5;    // Medium = match nearby group heading
+cohesionRadius = 5;     // Medium = stay with nearby group
+
+// Force weights
+separationWeight = 1.5; // Higher = avoid collisions more aggressively
+alignmentWeight = 1.0;  // Standard
+cohesionWeight = 1.0;   // Standard
+
+// Physics
+maxSpeed = 0.3;         // Maximum velocity
+maxForce = 0.05;        // Maximum steering force
+```
+
+## Extensions
+
+- Add obstacle avoidance
+- Target seeking behavior
+- Predator/prey dynamics
+- Wind/flow field influence
+- Trail rendering for motion visualization
+
+## References
+
+- Reynolds, C. W. (1987). "Flocks, herds and schools: A distributed behavioral model"
+- [Red3d.com/cwr/boids](http://www.red3d.com/cwr/boids/) — Original implementation

@@ -1,0 +1,55 @@
+---
+layout: ../../layouts/ContentLayout.astro
+title: "SQL Server: UPSERT Without MERGE"
+description: "Insert new rows and update existing rows safely without using MERGE."
+tags: [sql, sql-server, upsert, data-fix]
+updated: "2026-02-16"
+sqlVersion: "2008"
+placeholders:
+  - token: "target_table"
+    label: "Table"
+    hint: "e.g. dbo.Orders"
+  - token: "staging_table"
+    label: "Staging table"
+    hint: "e.g. stg.Orders"
+  - token: "id"
+    label: "Key column"
+    hint: "e.g. OrderId"
+  - token: "some_column"
+    label: "Column to change"
+    hint: "e.g. Status"
+---
+
+import OpenInTool from '../../components/OpenInTool.astro';
+
+## Problem
+
+You need to insert new records and update existing ones from a staging table. The `MERGE` statement can introduce unexpected behaviour and locking issues in some environments.
+
+## Solution
+
+Split the operation into an UPDATE followed by an INSERT.
+
+```sql
+-- Update existing rows
+UPDATE t
+SET t.some_column = s.some_column
+FROM target_table t
+JOIN staging_table s ON s.id = t.id;
+
+-- Insert new rows
+INSERT INTO target_table (id, some_column)
+SELECT s.id, s.some_column
+FROM staging_table s
+LEFT JOIN target_table t ON t.id = s.id
+WHERE t.id IS NULL;
+```
+
+<OpenInTool tool="list-to-sql" values={{ input: 'id\tsome_column\n123\tValue A\n456\tValue B\n789\tValue C', format: 'temp', header: true }} label="Load rows pasted from a spreadsheet into a #temp table to use as the staging table, in List to SQL" />
+
+## Notes
+
+- Easier to reason about than MERGE.
+- Avoids known MERGE edge cases in SQL Server.
+- Allows different validation logic for updates vs inserts.
+- Often performs better for large batches.

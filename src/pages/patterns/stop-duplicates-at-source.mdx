@@ -1,0 +1,173 @@
+---
+layout: ../../layouts/ContentLayout.astro
+title: "Stopping Duplicates at the Source Instead of Cleaning Them Up"
+description: "Where duplicate records come from, and how to design imports, constraints, and matching so they cannot be created."
+tags: ['data-quality', 'integrations', 'sql-server', 'operations']
+updated: "2026-10-24"
+---
+
+## Problem
+
+Duplicate records are found, a clean-up script removes them, and a month later they are back. Each clean-up treats the symptom while the route that created the duplicates stays open.
+
+## Context
+
+Systems that receive data from imports, integrations, user entry, or a merger of older systems. Duplicates cause double payments, split customer history, overstated reports, and integrations that match against the wrong record.
+
+By the time duplicates are noticed, other records often reference them, which makes removal slower and riskier than prevention.
+
+## Solution
+
+Find out how duplicates are getting in, define what makes two records the same, and close each route with a rule the database enforces.
+
+### 1. Find the source before cleaning up
+
+The gap between when duplicate copies were created is usually the best clue to the cause.
+
+```sql
+WITH dupes AS (
+  SELECT
+    email,
+    DATEDIFF(SECOND, MIN(created_at), MAX(created_at)) AS seconds_apart
+  FROM customer
+  GROUP BY email
+  HAVING COUNT(*) > 1
+)
+SELECT g.likely_cause, COUNT(*) AS duplicate_groups
+FROM dupes d
+CROSS APPLY (SELECT CASE
+  WHEN d.seconds_apart <= 5 THEN '1. within seconds: retry or double submit'
+  WHEN d.seconds_apart <= 86400 THEN '2. same day: re-import or rerun'
+  ELSE '3. days apart: matching or manual entry'
+END AS likely_cause) g
+GROUP BY g.likely_cause
+ORDER BY g.likely_cause;
+```
+
+Also compare `created_by`, batch identifiers, or source file names across each pair. Duplicates from one integration account usually point to a single fault rather than a general data quality problem.
+
+### 2. Define what makes two records the same
+
+Agree a business definition of <span class="jargon" data-tooltip="The set of values that uniquely identifies a real-world thing, such as a customer or invoice">identity</span> and write it down. For example, a supplier invoice is identified by supplier and invoice number, not by amount and date.
+
+Decide how values are <span class="jargon" data-tooltip="Converting values to a standard form before comparing, such as trimming spaces or removing formatting">normalised</span> before comparison:
+
+- leading and trailing spaces
+- letter case
+- formatting of phone numbers, postcodes, and references
+- leading zeros in codes
+
+Store the normalised form so every check uses exactly the same rule.
+
+### 3. Enforce identity in the database
+
+Application checks alone are not enough. Two requests arriving at the same moment can both check, both find nothing, and both insert. A unique constraint closes that gap.
+
+```sql
+-- Normalised key, kept in step with the source column automatically
+ALTER TABLE customer
+  ADD email_key AS LOWER(LTRIM(RTRIM(email))) PERSISTED;
+
+CREATE UNIQUE INDEX UX_customer_email_key
+ON customer (email_key);
+```
+
+This example assumes `email` is required. For optional columns, enforce uniqueness only on rows where a value is present.
+
+Existing duplicates must be removed before the index can be created. See [Find and Remove Duplicate Rows with ROW_NUMBER()](/snippets/sql-remove-duplicates-row-number).
+
+### 4. Make imports and retries idempotent
+
+Most duplicates created within seconds of each other come from retries and reruns. Give every imported record a stable source reference, record which files have already been loaded, and use upserts rather than inserts.
+
+[Designing Integration Jobs That Are Safe to Rerun](/patterns/integration-jobs-safe-to-rerun) covers this in detail.
+
+### 5. Send near-matches to review
+
+Records that might be the same, such as the same name with a different email address, should not be merged automatically. Automatic merges combine history that is difficult to separate again if the match was wrong.
+
+Treat these as a separate review queue, in the same way the matching stage in [Designing Integration Pipelines That Fail Safely](/patterns/integration-pipelines-fail-safely) produces a mapping that can be checked independently.
+
+### 6. Decide which record wins
+
+When duplicates are merged, agree the <span class="jargon" data-tooltip="The rules that decide which values are kept when two records are combined">survivorship rules</span> in advance:
+
+- earliest created
+- most complete
+- most recently updated
+- the record from the system of record
+
+Repoint child records (orders, notes, payments) to the surviving record before removing the others.
+
+## Trade-offs
+
+A unique constraint turns duplicates that were silently accepted into errors. Integrations must treat a unique key violation (SQL Server errors 2601 and 2627) as "already exists" rather than as a failure, or the constraint will break them.
+
+Normalisation rules can be too aggressive. Two people sharing a household email address are not the same customer, and a rule that says otherwise creates a different data quality problem.
+
+Review queues need people to work them. A queue that is never reviewed is a slower way of losing data.
+
+## Checks
+
+After closing a source of duplicates:
+
+- schedule the duplicate count query and confirm it stays at zero
+- rerun a recent import and confirm no new rows are created
+- submit the same form twice in quick succession
+- confirm unique key violations are handled cleanly by every writer
+- check that the review queue is being worked and is not growing
+
+## Notes
+
+Every duplicate clean-up should end with either a constraint or a documented reason why one is not possible.
+
+Duplicates are rarely random. They usually come from a small number of specific routes, and closing those routes is less work than cleaning up after them indefinitely.
+
+<style is:global>{`
+  .jargon {
+    position: relative;
+    text-decoration: underline;
+    text-decoration-style: dotted;
+    text-decoration-color: var(--accent, #0ea5e9);
+    text-decoration-thickness: 2px;
+    text-underline-offset: 3px;
+    cursor: help;
+  }
+
+  .jargon::after {
+    content: attr(data-tooltip);
+    position: absolute;
+    bottom: 100%;
+    left: 50%;
+    transform: translateX(-50%) translateY(-8px);
+    padding: 0.625rem 0.875rem;
+    background: var(--surface-elevated, #2a2a2a);
+    color: var(--text-primary, #fff);
+    border: 1px solid var(--border, #444);
+    border-radius: 0.375rem;
+    font-size: 0.875rem;
+    line-height: 1.5;
+    white-space: normal;
+    max-width: 400px;
+    min-width: 200px;
+    width: max-content;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.2s ease;
+    z-index: 1000;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  }
+
+  .jargon:hover::after {
+    opacity: 1;
+  }
+
+  @media (max-width: 768px) {
+    .jargon::after {
+      left: 0;
+      transform: translateX(0) translateY(-8px);
+      max-width: 280px;
+      min-width: 180px;
+    }
+  }
+`}</style>

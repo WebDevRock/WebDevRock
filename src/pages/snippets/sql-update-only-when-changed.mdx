@@ -1,0 +1,57 @@
+---
+layout: ../../layouts/ContentLayout.astro
+title: "SQL Server: Update Only When Values Change"
+description: "Avoid unnecessary writes and locking by updating rows only when values differ."
+tags: [sql, sql-server, performance, data-fix]
+updated: "2026-02-16"
+sqlVersion: "2008"
+placeholders:
+  - token: "target_table"
+    label: "Table"
+    hint: "e.g. dbo.Orders"
+  - token: "id"
+    label: "Key column"
+    hint: "e.g. OrderId"
+  - token: "some_column"
+    label: "Column to change"
+    hint: "e.g. Status"
+---
+
+import OpenInTool from '../../components/OpenInTool.astro';
+
+## Problem
+
+A bulk update runs successfully but updates every matching row, even when the value has not changed. This increases locking, transaction log usage, and can trigger unnecessary downstream processes.
+
+## Solution
+
+Add a comparison condition so only genuinely changed rows are updated.
+
+```sql
+UPDATE t
+SET t.some_column = tu.new_some_column
+FROM target_table t
+JOIN #temp_updates tu ON tu.id = t.id
+WHERE
+    t.some_column <> tu.new_some_column
+    OR t.some_column IS NULL;
+```
+
+<OpenInTool tool="data-fix-script" values={{ table: 'target_table', keys: 'id', columns: 'some_column', mode: 'join', source: '#temp_updates', ticket: 'INC-1234' }} label="Generate this change-only update with a backup and rollback in the Data Fix Script Builder" />
+
+## Notes
+
+- Reduces transaction log growth during large updates.
+- Minimises locking and index churn.
+- Particularly useful when updates trigger audit logs or change tracking.
+- Always preview with a SELECT first:
+
+```sql
+SELECT *
+FROM target_table t
+JOIN #temp_updates tu ON tu.id = t.id
+WHERE
+    t.some_column <> tu.new_some_column
+    OR t.some_column IS NULL;
+
+```

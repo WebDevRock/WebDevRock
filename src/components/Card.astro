@@ -1,0 +1,99 @@
+---
+interface Props {
+  title: string;
+  href: string;
+  tags?: string[];
+  description?: string;
+  label?: string; // small note above the title, e.g. "SQL Server 2016+"
+}
+
+const { title, href, tags, description, label } = Astro.props;
+---
+
+<a href={href} class="card">
+  {label && <span class="label">{label}</span>}
+  <h3>{title}</h3>
+  {description && <p class="description">{description}</p>}
+  {tags && tags.length > 0 && (
+    <div class="tags">
+      {tags.map(tag => <span class="tag">{tag}</span>)}
+    </div>
+  )}
+</a>
+
+<style>
+  .card {
+    display: block;
+    padding: 2rem;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-subtle);
+    border-radius: 16px;
+    text-decoration: none;
+    color: inherit;
+    transition: all 0.3s ease;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .card::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 3px;
+    background: var(--gradient-1);
+    opacity: 0;
+    transition: opacity 0.3s ease;
+  }
+
+  .card:hover {
+    border-color: var(--border);
+    transform: translateY(-4px);
+    box-shadow: 0 20px 40px rgba(0, 0, 0, 0.3);
+  }
+
+  .card:hover::before {
+    opacity: 1;
+  }
+
+  .label {
+    display: inline-block;
+    margin-bottom: 0.75rem;
+    padding: 0.15rem 0.5rem;
+    border: 1px solid color-mix(in srgb, var(--accent-amber) 45%, transparent);
+    border-radius: 4px;
+    color: var(--accent-amber);
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+  }
+
+  .card h3 {
+    margin: 0 0 0.75rem 0;
+    font-size: 1.25rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    letter-spacing: -0.01em;
+  }
+
+  .description {
+    margin: 0 0 1.5rem 0;
+    color: var(--text-secondary);
+    font-size: 0.95rem;
+    line-height: 1.6;
+  }
+
+  .tags {
+    display: flex;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+  }
+
+  .tag {
+    padding: 0.25rem 0.6rem;
+    background: var(--bg-elevated);
+    border-radius: 4px;
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+  }

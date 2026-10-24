@@ -1,0 +1,80 @@
+---
+layout: ../../layouts/ContentLayout.astro
+title: "SQL Server: Find and Remove Duplicate Rows with ROW_NUMBER()"
+description: "Preview duplicate rows, keep one per group, and delete the rest safely."
+tags: [sql, sql-server, data-fix, duplicates]
+updated: "2026-10-24"
+sqlVersion: "2008"
+placeholders:
+  - token: "target_table"
+    label: "Table"
+    hint: "e.g. dbo.Orders"
+  - token: "email"
+    label: "Column(s) that define a duplicate"
+    hint: "e.g. Email"
+  - token: "created_at"
+    label: "Keep the row with the earliest…"
+    hint: "e.g. CreatedDate"
+  - token: "id"
+    label: "Key column"
+    hint: "e.g. OrderId"
+---
+
+## Problem
+
+A table has duplicate rows (for example the same email imported twice) and you need to keep one row per group and delete the others, without guessing which rows will go.
+
+## Solution
+
+Number the rows in each duplicate group with `ROW_NUMBER()`. Row 1 is kept; everything above 1 is deleted. Preview first, then delete through the same CTE.
+
+```sql
+-- 1) Preview every duplicate group (rn = 1 is the row that will be kept)
+WITH ranked AS (
+  SELECT
+    t.*,
+    ROW_NUMBER() OVER (
+      PARTITION BY t.email            -- column(s) that define a duplicate
+      ORDER BY t.created_at, t.id     -- the first row in each group is kept
+    ) AS rn,
+    COUNT(*) OVER (PARTITION BY t.email) AS copies
+  FROM target_table t
+)
+SELECT *
+FROM ranked
+WHERE copies > 1
+ORDER BY email, rn;
+
+-- 2) Delete everything except the first row in each group
+BEGIN TRAN;
+
+WITH ranked AS (
+  SELECT
+    ROW_NUMBER() OVER (
+      PARTITION BY email
+      ORDER BY created_at, id
+    ) AS rn
+  FROM target_table
+)
+DELETE FROM ranked
+WHERE rn > 1;
+
+SELECT @@ROWCOUNT AS rows_deleted;
+
+-- COMMIT;
+-- ROLLBACK;
+
+-- 3) Stop it happening again
+CREATE UNIQUE INDEX UX_target_table_email
+ON target_table (email)
+WHERE email IS NOT NULL;
+```
+
+## Notes
+
+- Always end the `ORDER BY` with a unique column (like `id`). Otherwise ties are broken randomly and the preview may not match what's deleted.
+- Use the same `PARTITION BY` and `ORDER BY` in both steps.
+- Rows where the partition column is `NULL` are grouped together and treated as duplicates of each other. Add `WHERE email IS NOT NULL` to both steps if that's not what you want.
+- Comparisons follow the column's collation: under the default case-insensitive collation, `A@x.com` and `a@x.com` are duplicates. To also ignore stray spaces, partition by `LTRIM(RTRIM(email))`.
+- If other tables reference the duplicates through foreign keys, repoint those rows to the kept row before deleting.
+- To keep a copy of what you delete, see [Record Changed Rows with OUTPUT INTO](/snippets/sql-output-into-audit).

@@ -1,0 +1,191 @@
+---
+layout: ../../layouts/ContentLayout.astro
+title: "Designing Audit Trails That Help Investigation"
+description: "What to record about data changes, and how to store it so you can answer what happened when something goes wrong."
+tags: ['audit', 'operations', 'sql-server', 'observability']
+updated: "2026-10-24"
+---
+
+## Problem
+
+When someone asks who changed a record and why, the audit trail exists but cannot answer. It shows a `ModifiedBy` and `ModifiedDate` that only describe the last change, a log of free text that cannot be queried, or a service account name that says an integration changed the data but not which run or why.
+
+## Context
+
+Operational systems where data is changed by users, integrations, scheduled jobs, and occasional data fixes. Audit is needed for support investigations, compliance, and reversing mistakes, usually under time pressure.
+
+This is the same problem described in [Why Status Tables Fail Operations Teams](/patterns/status-tables-fail-operations), applied to history rather than current state: audit has to be designed for investigation, not display.
+
+## Solution
+
+Design the audit trail from the questions it has to answer:
+
+- what was the value before, and what is it now?
+- who or what made the change?
+- when did it happen?
+- why: which ticket, job run, or user action?
+- what else changed at the same time?
+
+An audit trail that can answer all five without a developer reading logs is doing its job.
+
+### 1. Record before and after values
+
+Columns such as `ModifiedBy` and `ModifiedDate` are overwritten by every change, so they only ever describe the latest one. Keep a separate history with the old and new values.
+
+```sql
+CREATE TABLE audit_change (
+  audit_id BIGINT IDENTITY PRIMARY KEY,
+  table_name SYSNAME NOT NULL,
+  record_id NVARCHAR(100) NOT NULL,
+  column_name SYSNAME NOT NULL,
+  old_value NVARCHAR(MAX) NULL,
+  new_value NVARCHAR(MAX) NULL,
+  changed_at DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
+  changed_by NVARCHAR(256) NOT NULL,
+  change_source NVARCHAR(50) NOT NULL,   -- 'UI', 'Integration', 'DataFix'...
+  correlation_id NVARCHAR(100) NULL      -- groups changes from one action, run, or fix
+);
+
+CREATE INDEX IX_audit_change_record
+ON audit_change (table_name, record_id, changed_at);
+```
+
+### 2. Record who, and on whose behalf
+
+Changes made through a shared database login or a service account all look the same. Pass the real actor through to the database using <span class="jargon" data-tooltip="Key-value pairs attached to a SQL Server connection that triggers and procedures can read">session context</span>:
+
+```sql
+-- Set once per connection by the application or job
+EXEC sp_set_session_context @key = N'changed_by', @value = N'invoice-import-job';
+EXEC sp_set_session_context @key = N'correlation_id', @value = N'run-20261024-0300';
+
+-- Read in triggers or procedures, falling back to the login name
+SELECT COALESCE(
+  CAST(SESSION_CONTEXT(N'changed_by') AS NVARCHAR(256)),
+  SUSER_SNAME()
+) AS changed_by;
+```
+
+For user actions, record the signed-in user, not the application's connection account.
+
+### 3. Record why with a correlation id
+
+Give every change a <span class="jargon" data-tooltip="An identifier shared by every change made by the same action, so they can be found and reviewed together">correlation id</span>: the ticket number for a data fix, the run id for an integration, or a request id for a user action.
+
+This groups related changes so they can be reviewed, explained, or reversed together. A data fix recorded with [OUTPUT INTO](/snippets/sql-output-into-audit) and tagged with its ticket number can be undone as a unit, as described in [Designing a Reversible Data Fix in SQL Server](/patterns/sql-reversible-data-fix).
+
+### 4. Choose where to capture changes
+
+Each capture point sees a different part of the picture:
+
+- **Application layer:** knows the user and the reason, but misses changes made directly in the database.
+- **Triggers:** catch every change, but add write overhead and only know why if session context is set.
+- **OUTPUT INTO in data fixes:** explicit and tied to a specific operation, but only covers the fixes that use it.
+- **Temporal tables:** SQL Server keeps full row history automatically (2016 and later), but records nothing about who or why unless columns are added for it.
+- **Change Data Capture:** designed for feeding downstream systems, and awkward to use for investigation.
+
+Most systems combine two: one mechanism for completeness, such as triggers or temporal tables, and session context for who and why.
+
+```sql
+-- Full history of one row in a temporal table
+SELECT *
+FROM customer
+FOR SYSTEM_TIME ALL
+WHERE customer_id = 42
+ORDER BY ValidFrom;  -- period column named when the table was made temporal
+```
+
+### 5. Make it queryable
+
+Audit is only useful if it can be searched quickly when something goes wrong.
+
+- index by record and time, as above
+- store values as text in a consistent format, especially dates and decimals
+- provide a "history of this record" view that operations users can open without writing SQL
+- avoid storing changes only as JSON or free text that has to be parsed during an investigation
+
+### 6. Decide retention and access
+
+Agree how long audit is kept and who can read it. Audit often contains personal data, which brings data protection obligations, including how to handle erasure requests for data that also appears in history.
+
+Audit should be append-only for everyone except a controlled retention process:
+
+```sql
+DENY UPDATE, DELETE ON audit_change TO app_role;
+```
+
+## Trade-offs
+
+Audit tables grow quickly. Column-level history for busy tables can exceed the size of the data itself, and needs a retention plan from the start.
+
+Triggers add cost to every write. On high-volume tables, the overhead needs measuring before the trigger goes live.
+
+Recording too much creates noise. Auditing every column, including timestamps that change on every save, makes real changes harder to find.
+
+Personal data in audit history complicates erasure requests, because removing it conflicts with keeping a complete record.
+
+## Checks
+
+After implementing or changing an audit trail:
+
+- pick a recent record and answer all five questions using only the audit data, and note how long it takes
+- confirm a data fix appears with its ticket number as the correlation id
+- confirm an integration change shows the job and run, not just the service account
+- confirm the application cannot update or delete audit rows
+- confirm a retention job exists and runs
+- confirm how personal data in audit history is handled has been agreed
+
+## Notes
+
+Audit trails are used on the worst days: during incidents, disputes, and investigations. If answering a simple question requires a developer and an hour of reading logs, the audit trail is not doing its job.
+
+The cost of recording who, why, and the old value at the time of the change is small. Reconstructing them afterwards is usually impossible.
+
+<style is:global>{`
+  .jargon {
+    position: relative;
+    text-decoration: underline;
+    text-decoration-style: dotted;
+    text-decoration-color: var(--accent, #0ea5e9);
+    text-decoration-thickness: 2px;
+    text-underline-offset: 3px;
+    cursor: help;
+  }
+
+  .jargon::after {
+    content: attr(data-tooltip);
+    position: absolute;
+    bottom: 100%;
+    left: 50%;
+    transform: translateX(-50%) translateY(-8px);
+    padding: 0.625rem 0.875rem;
+    background: var(--surface-elevated, #2a2a2a);
+    color: var(--text-primary, #fff);
+    border: 1px solid var(--border, #444);
+    border-radius: 0.375rem;
+    font-size: 0.875rem;
+    line-height: 1.5;
+    white-space: normal;
+    max-width: 400px;
+    min-width: 200px;
+    width: max-content;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.2s ease;
+    z-index: 1000;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  }
+
+  .jargon:hover::after {
+    opacity: 1;
+  }
+
+  @media (max-width: 768px) {
+    .jargon::after {
+      left: 0;
+      transform: translateX(0) translateY(-8px);
+      max-width: 280px;
+      min-width: 180px;
+    }
+  }
+`}</style>

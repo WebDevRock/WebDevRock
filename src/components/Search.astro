@@ -1,0 +1,197 @@
+---
+// Header search: a link to /search/ that opens a dialog when JavaScript is available.
+// Shortcuts: "/" or Ctrl/Cmd+K.
+---
+
+<a href="/search/" class="search-trigger" data-search-open aria-haspopup="dialog">
+  <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+    <circle cx="11" cy="11" r="7"></circle>
+    <path d="m20 20-3.5-3.5"></path>
+  </svg>
+  <span class="search-trigger-label">Search</span>
+  <kbd>/</kbd>
+</a>
+
+<dialog class="search-dialog" aria-labelledby="search-dialog-title" data-search-dialog>
+  <div class="search-dialog-header">
+    <h2 id="search-dialog-title">Search WebDevRock</h2>
+    <button type="button" class="search-close" data-search-close aria-label="Close search">Esc</button>
+  </div>
+  <div id="search-dialog-ui" class="search-ui"></div>
+</dialog>
+
+<script>
+  import { trackEvent } from '../scripts/analytics';
+  import { mountSearch } from '../scripts/search';
+
+  const dialog = document.querySelector<HTMLDialogElement>('[data-search-dialog]');
+  const trigger = document.querySelector<HTMLAnchorElement>('[data-search-open]');
+
+  if (dialog && trigger) {
+    const open = (from: string) => {
+      if (dialog.open) return;
+      dialog.showModal();
+      trackEvent('search', { action: 'open', from });
+      mountSearch('#search-dialog-ui', 'dialog');
+    };
+
+    trigger.addEventListener('click', (event) => {
+      event.preventDefault();
+      open('button');
+    });
+
+    document.querySelector('[data-search-close]')?.addEventListener('click', () => dialog.close());
+
+    // Close when clicking the backdrop
+    dialog.addEventListener('click', (event) => {
+      if (event.target === dialog) dialog.close();
+    });
+
+    document.addEventListener('keydown', (event) => {
+      const target = event.target as HTMLElement;
+      const typing = target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName);
+      const shortcut = (event.key === '/' && !typing) || (event.key.toLowerCase() === 'k' && (event.ctrlKey || event.metaKey));
+      if (!shortcut) return;
+      event.preventDefault();
+      open('shortcut');
+    });
+  }
+</script>
+
+<style>
+  .search-trigger {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.4rem 0.6rem 0.4rem 0.75rem;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg-surface);
+    color: var(--text-secondary);
+    font-size: 0.875rem;
+    text-decoration: none;
+    white-space: nowrap;
+    transition: border-color 0.2s ease, color 0.2s ease;
+  }
+
+  .search-trigger:hover,
+  .search-trigger:focus-visible {
+    border-color: var(--accent-cyan);
+    color: var(--text-primary);
+  }
+
+  .search-trigger kbd {
+    padding: 0 0.4rem;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    color: var(--text-muted);
+  }
+
+  .search-dialog {
+    width: min(720px, calc(100vw - 2rem));
+    max-height: min(80vh, 760px);
+    margin: 10vh auto auto;
+    padding: 0;
+    background: var(--bg-surface);
+    color: var(--text-primary);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    box-shadow: 0 30px 80px rgba(0, 0, 0, 0.6);
+    overflow: hidden;
+  }
+
+  .search-dialog[open] {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .search-dialog::backdrop {
+    background: rgba(0, 0, 0, 0.6);
+    backdrop-filter: blur(4px);
+  }
+
+  .search-dialog-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.875rem 1.25rem;
+    border-bottom: 1px solid var(--border-subtle);
+  }
+
+  .search-dialog-header h2 {
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+    font-weight: 500;
+    color: var(--text-muted);
+  }
+
+  .search-close {
+    padding: 0.2rem 0.5rem;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text-secondary);
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    cursor: pointer;
+  }
+
+  .search-dialog .search-ui {
+    padding: 1rem 1.25rem 1.25rem;
+    overflow-y: auto;
+  }
+
+  @media (max-width: 768px) {
+    .search-trigger-label,
+    .search-trigger kbd {
+      display: none;
+    }
+
+    .search-trigger {
+      padding: 0.45rem;
+    }
+
+    .search-dialog {
+      margin-top: 1rem;
+      max-height: calc(100vh - 2rem);
+    }
+  }
+</style>
+
+<style is:global>
+  /* Pagefind UI, themed with the site palette (used by the dialog and /search/) */
+  .search-ui {
+    --pagefind-ui-scale: 0.85;
+    --pagefind-ui-primary: var(--accent-cyan);
+    --pagefind-ui-text: var(--text-primary);
+    --pagefind-ui-background: var(--bg-deep);
+    --pagefind-ui-border: var(--border);
+    --pagefind-ui-tag: var(--bg-elevated);
+    --pagefind-ui-border-width: 1px;
+    --pagefind-ui-border-radius: 10px;
+    --pagefind-ui-font: var(--font-sans);
+  }
+
+  .search-ui .pagefind-ui__result-link {
+    color: var(--text-primary);
+  }
+
+  .search-ui .pagefind-ui__result-excerpt,
+  .search-ui .pagefind-ui__message {
+    color: var(--text-secondary);
+  }
+
+  /* More specific than Pagefind's own ".pagefind-ui--reset mark", which loads later */
+  .search-ui .pagefind-ui--reset mark {
+    background: color-mix(in srgb, var(--accent-cyan) 25%, transparent);
+    color: var(--text-primary);
+    border-radius: 2px;
+  }
+
+  .search-unavailable {
+    color: var(--text-muted);
+    font-size: 0.9rem;
+  }
+</style>
