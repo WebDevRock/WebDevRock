@@ -14,11 +14,16 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 
-# environment variables: .env.production holds the Umami settings, and ops/umami/.env
-# (created on the droplet) holds database passwords. Only the examples are committed.
+# environment variables: .env.production holds the Umami settings, .env.report the Umami login for
+# npm run report, and ops/umami/.env (created on the droplet) holds database passwords.
+# Only the examples are committed.
 .env
 .env.*
 !.env.example
+!.env.*.example
+
+# content health reports (npm run report): they include what readers searched for
+reports/
 
 # macOS-specific files
 .DS_Store

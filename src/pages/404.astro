@@ -67,7 +67,9 @@ const countFor = (key: string) => pages.filter((p) => p.section === key).length;
     .join(' ')
     .slice(0, 80);
 
-  trackEvent('not-found', { path, referrer: document.referrer ? new URL(document.referrer).hostname : 'direct' });
+  const referrer = document.referrer ? new URL(document.referrer).hostname : 'direct';
+  // link: referrer and path in one property, so the health report can list which sites link to which missing pages
+  trackEvent('not-found', { path, referrer, link: `${referrer} | ${path}` });
   mountSearch('#not-found-search', 'not-found', term);
 </script>
 

@@ -8,7 +8,8 @@
     "build": "astro build && pagefind --site dist",
     "preview": "astro preview",
     "astro": "astro",
-    "deploy": "npm run build && powershell -ExecutionPolicy Bypass -File .\\deploy.ps1"
+    "deploy": "npm run build && powershell -ExecutionPolicy Bypass -File .\\deploy.ps1",
+    "report": "node --env-file-if-exists=.env.production --env-file-if-exists=.env.report scripts/content-report.mjs"
   },
   "dependencies": {
     "@astrojs/mdx": "^2.1.0",

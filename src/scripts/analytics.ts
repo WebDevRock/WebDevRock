@@ -21,7 +21,8 @@ let toolUseMuted = false;
 
 // Call from a tool's main action, e.g. trackToolUse('json-formatter', 'format')
 export function trackToolUse(tool: string, action: string) {
-  if (!toolUseMuted) trackEvent('tool-use', { tool, action });
+  // use: both values in one property, so the health report can count copies per tool (npm run report)
+  if (!toolUseMuted) trackEvent('tool-use', { tool, action, use: `${action} | ${tool}` });
 }
 
 // Runs a tool action without counting it as a use, e.g. showing the result of a shared link as it opens

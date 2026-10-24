@@ -75,7 +75,8 @@ const reasons = [
 
       const answer = button.dataset.answer;
       if (answer) {
-        trackEvent('feedback', { page, useful: answer });
+        // vote: both values in one property, so the health report can count "No" per page (npm run report)
+        trackEvent('feedback', { page, useful: answer, vote: `${answer} | ${page}` });
         remember(answer);
         if (answer === 'yes') finish('Thanks, glad it helped.');
         else {
@@ -87,7 +88,7 @@ const reasons = [
 
       const reason = button.dataset.reason;
       if (reason) {
-        trackEvent('feedback-reason', { page, reason });
+        trackEvent('feedback-reason', { page, reason, pageReason: `${reason} | ${page}` });
         finish('Thanks, that helps decide what to improve.');
       }
     });
