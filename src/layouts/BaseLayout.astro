@@ -3,7 +3,7 @@
 // On phones the sidebar folds behind a menu button.
 import '../styles/global.css';
 import Search from '../components/Search.astro';
-import { SECTIONS, getContentPages, normalisePath } from '../lib/content';
+import { SECTIONS, getContentPages, isoDateTime, normalisePath } from '../lib/content';
 
 interface Props {
   title: string;
@@ -115,7 +115,7 @@ const toJsonLd = (data: Record<string, unknown>) => JSON.stringify(data).replace
     <meta property="og:image:height" content="630" />
     <meta property="og:image:alt" content="WebDevRock: practical patterns for real-world development" />
     <meta property="og:locale" content="en_GB" />
-    {type === 'article' && updated && <meta property="article:modified_time" content={updated} />}
+    {type === 'article' && updated && <meta property="article:modified_time" content={isoDateTime(updated)} />}
 
     <!-- Twitter / X -->
     <meta name="twitter:card" content="summary_large_image" />

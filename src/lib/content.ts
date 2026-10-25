@@ -148,6 +148,9 @@ export function normalisePath(pathname: string): string {
   return pathname.endsWith('/') ? pathname : `${pathname}/`;
 }
 
+// A front matter date as a full timestamp, midnight UTC: structured data and meta tags want a time and a zone
+export const isoDateTime = (date: string) => `${date}T00:00:00+00:00`;
+
 export function formatDate(iso: string): string {
   return new Intl.DateTimeFormat('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }).format(new Date(iso));
 }

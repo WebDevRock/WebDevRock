@@ -7,7 +7,7 @@ import PageFeedback from '../components/PageFeedback.astro';
 import PlaceholderPanel from '../components/PlaceholderPanel.astro';
 import TableOfContents from '../components/TableOfContents.astro';
 import TypeLabel from '../components/TypeLabel.astro';
-import { SECTIONS, formatDate, normalisePath, readingMinutes, sqlVersionLabel, sqlVersionsFrom, tagPath, type Frontmatter } from '../lib/content';
+import { SECTIONS, formatDate, isoDateTime, normalisePath, readingMinutes, sqlVersionLabel, sqlVersionsFrom, tagPath, type Frontmatter } from '../lib/content';
 import type { Placeholder } from '../scripts/placeholders';
 import '../styles/content.css';
 
@@ -32,7 +32,7 @@ const common = {
   description,
   url,
   inLanguage: 'en-GB',
-  dateModified: updated,
+  dateModified: updated ? isoDateTime(updated) : undefined,
   keywords: tags?.join(', '),
   author: publisher,
 };
