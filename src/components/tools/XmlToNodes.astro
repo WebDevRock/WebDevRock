@@ -84,7 +84,7 @@ import '../../styles/tools.css';
         if (result.child) parts.push(`${plural(result.child.rows, 'child row')} at ${result.child.path}`);
         if (result.suggestedChild) parts.push(`${result.suggestedChild} repeats: enter it as child rows to get one row each`);
         const noted = result.columns.filter((c) => c.note && c.type !== 'XML').length;
-        if (noted) parts.push(`${plural(noted, 'column')} need a type check (see comments)`);
+        if (noted) parts.push(`${plural(noted, 'column')} ${noted === 1 ? 'needs' : 'need'} a type check (see comments)`);
 
         setStatus(status, parts.join(' · '), noted ? 'warn' : 'info');
         trackToolUse('xml-to-nodes', 'generate');

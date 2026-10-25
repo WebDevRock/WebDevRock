@@ -76,7 +76,7 @@ import '../../styles/tools.css';
         const message = `${result.columns.length} columns from ${result.rows} row${result.rows === 1 ? '' : 's'} at ${result.path}`;
         setStatus(
           status,
-          noted ? `${message} · ${noted} column${noted === 1 ? '' : 's'} need a type check (see comments)` : message,
+          noted ? `${message} · ${noted} column${noted === 1 ? ' needs' : 's need'} a type check (see comments)` : message,
           noted ? 'warn' : 'info',
         );
         trackToolUse('json-to-openjson', 'generate');
