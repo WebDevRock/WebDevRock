@@ -12,6 +12,8 @@ interface Props {
   updated?: string;
   noindex?: boolean; // e.g. the 404 page: keep it out of search engines and give it no canonical URL
   crumbs?: { label: string; href?: string }[]; // after "Home"; worked out from the address when left out
+  fullTitle?: string; // the whole <title>, for the homepage; otherwise "<title> — WebDevRock"
+  structuredData?: Record<string, unknown>[]; // schema.org JSON-LD for this page, e.g. a TechArticle
 }
 
 const {
@@ -20,10 +22,13 @@ const {
   type = 'website',
   updated,
   noindex = false,
+  structuredData = [],
 } = Astro.props;
 
 const siteName = 'WebDevRock';
-const fullTitle = `${title} — ${siteName}`;
+// Search results cut titles at about 60 characters: long page titles drop the site name rather than lose words
+const suffixed = `${title} — ${siteName}`;
+const fullTitle = Astro.props.fullTitle ?? (suffixed.length > 60 ? title : suffixed);
 
 // Same trailing-slash form as the sitemap and nginx's directory URLs
 const path = normalisePath(Astro.url.pathname);
@@ -55,6 +60,31 @@ const crumbs =
         { label: currentSection?.name ?? otherAreas[segments[0]] ?? title, href: segments.length > 1 ? `/${segments[0]}/` : undefined },
         ...(segments.length > 1 ? [{ label: title }] : []),
       ]);
+
+// Markdown copy of a content page, e.g. /snippets/sql-bulk-update-join.md (src/pages/[section]/[slug].md.ts)
+const markdownCopy = pages.some((p) => p.path === path) ? `${path.replace(/\/$/, '')}.md` : undefined;
+
+// schema.org structured data: the site on the homepage, breadcrumbs everywhere else, plus whatever the page adds
+const homeUrl = new URL('/', Astro.site).href;
+const jsonLd: Record<string, unknown>[] = [];
+if (path === '/') {
+  jsonLd.push({ '@context': 'https://schema.org', '@type': 'WebSite', name: siteName, url: homeUrl, description, inLanguage: 'en-GB' });
+} else if (!noindex && crumbs.length) {
+  const trail = [{ label: 'Home', href: '/' }, ...crumbs];
+  jsonLd.push({
+    '@context': 'https://schema.org',
+    '@type': 'BreadcrumbList',
+    itemListElement: trail.map((c, i) => ({
+      '@type': 'ListItem',
+      position: i + 1,
+      name: c.label,
+      item: c.href ? new URL(c.href, Astro.site).href : canonical,
+    })),
+  });
+}
+jsonLd.push(...structuredData);
+// "<" escaped so text such as "</script>" in a description can't end the script element early
+const toJsonLd = (data: Record<string, unknown>) => JSON.stringify(data).replace(/</g, '\\u003c');
 ---
 
 <!doctype html>
@@ -71,6 +101,8 @@ const crumbs =
     <link rel="sitemap" href="/sitemap-index.xml" />
     <link rel="alternate" type="application/rss+xml" title="WebDevRock" href="/rss.xml" />
     <link rel="alternate" type="text/plain" title="LLM-readable site index" href="/llms.txt" />
+    {markdownCopy && <link rel="alternate" type="text/markdown" title="This page as Markdown" href={markdownCopy} />}
+    {jsonLd.map((data) => <script type="application/ld+json" set:html={toJsonLd(data)} />)}
 
     <!-- Open Graph -->
     <meta property="og:type" content={type} />

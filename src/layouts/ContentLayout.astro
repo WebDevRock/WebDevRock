@@ -18,10 +18,45 @@ interface Props {
 }
 
 // MDX pages pass their front matter to the layout as Astro.props.frontmatter, and their headings as Astro.props.headings
-const { title, description, tags, updated, placeholders, sqlVersion, sqlNote } = Astro.props.frontmatter;
+const { title, description, tags, updated, placeholders, sqlVersion, sqlNote, level } = Astro.props.frontmatter;
 
 const path = normalisePath(Astro.url.pathname);
 const section = SECTIONS.find((s) => s.key === path.split('/')[1]);
+
+// schema.org: tools are browser apps, everything else is a technical article
+const url = new URL(path, Astro.site).href;
+const publisher = { '@type': 'Organization', name: 'WebDevRock', url: new URL('/', Astro.site).href };
+const common = {
+  '@context': 'https://schema.org',
+  name: title,
+  description,
+  url,
+  inLanguage: 'en-GB',
+  dateModified: updated,
+  keywords: tags?.join(', '),
+  author: publisher,
+};
+const structuredData =
+  section?.key === 'tools'
+    ? {
+        ...common,
+        '@type': 'WebApplication',
+        applicationCategory: 'DeveloperApplication',
+        operatingSystem: 'Any',
+        browserRequirements: 'Requires JavaScript. Runs entirely in the browser.',
+        isAccessibleForFree: true,
+      }
+    : {
+        ...common,
+        '@type': 'TechArticle',
+        headline: title,
+        mainEntityOfPage: url,
+        image: new URL('/og-default.png', Astro.site).href,
+        publisher,
+        // schema.org only has Beginner and Expert, so intermediate guides get neither
+        proficiencyLevel: { beginner: 'Beginner', advanced: 'Expert' }[level ?? ''],
+        dependencies: sqlVersion ? `SQL Server ${sqlVersion} or later` : undefined,
+      };
 
 // Patterns and AI guides are the long reads: give them a reading time and contents
 const LONG_READ_SECTIONS = ['patterns', 'ai'];
@@ -34,7 +69,7 @@ const showToc = headings.some((h) => h.depth === 2);
 const hasChecks = (Astro.props.headings ?? []).some((h) => h.depth === 2 && h.slug === 'checks');
 ---
 
-<BaseLayout title={title} description={description} type="article" updated={updated}>
+<BaseLayout title={title} description={description} type="article" updated={updated} structuredData={[structuredData]}>
   <article class:list={['content-page', { 'has-toc': showToc }]} data-pagefind-body data-pagefind-filter={section ? `section:${section.name}` : undefined}>
     <header class="page-header">
       {section && <TypeLabel section={section.key} glyph />}
