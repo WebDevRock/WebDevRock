@@ -237,6 +237,9 @@ export type PathPosition = {
   next?: ContentPage;
 };
 
+// Anchor for a learning path's group on the homepage, e.g. /#work-with-xml-in-sql-server
+export const learningPathId = (title: string) => tagSlug(title.replace(/['’]/g, ''));
+
 // Where a page sits in each learning path it belongs to
 export function getPathPositions(path: string): PathPosition[] {
   const byPath = new Map(getContentPages().map((p) => [p.path, p]));

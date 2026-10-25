@@ -3,7 +3,7 @@
 // you type, then the learning paths, recent updates and tools. Sections are in the sidebar.
 import BaseLayout from '../layouts/BaseLayout.astro';
 import TypeLabel from '../components/TypeLabel.astro';
-import { HOME_TASKS, LEARNING_PATHS, SECTIONS, byUpdated, formatDate, getContentPages, getSection } from '../lib/content';
+import { HOME_TASKS, LEARNING_PATHS, SECTIONS, byUpdated, formatDate, getContentPages, getSection, learningPathId } from '../lib/content';
 
 const pages = getContentPages();
 const byPath = new Map(pages.map((p) => [p.path, p]));
@@ -79,11 +79,11 @@ const searchText = (p: (typeof pages)[number], extra = '') =>
     </section>
 
     <div class="columns">
-      <section aria-labelledby="paths-title">
+      <section class="paths" id="start-here" aria-labelledby="paths-title">
         <h2 id="paths-title" class="col-title">Start here</h2>
         <p class="col-note">Read in order: each step builds on the one before.</p>
-        {paths.map((p, i) => (
-          <div class="path" id={i === 0 ? 'start-here' : undefined}>
+        {paths.map((p) => (
+          <div class="path" id={learningPathId(p.title)}>
             <h3 class="micro-label">{p.title}</h3>
             <ol>
               {p.steps.map((s) => (
@@ -350,9 +350,13 @@ const searchText = (p: (typeof pages)[number], extra = '') =>
     margin-left: 6px;
   }
 
+  .paths,
+  .path {
+    scroll-margin-top: 80px;
+  }
+
   .path {
     margin-top: 18px;
-    scroll-margin-top: 80px;
   }
 
   .path ol {

@@ -1,7 +1,7 @@
 ---
 // End-of-page navigation: learning path previous/next, then related pages by shared tags
 import TypeLabel from './TypeLabel.astro';
-import { byUpdated, getContentPages, getPathPositions, getRelatedPages, getSection } from '../lib/content';
+import { byUpdated, getContentPages, getPathPositions, getRelatedPages, getSection, learningPathId } from '../lib/content';
 
 interface Props {
   path: string; // normalised, e.g. /snippets/sql-bulk-update-join/
@@ -53,7 +53,7 @@ if (related.length === 0 && sectionKey) {
               <span class="link-title">{pos.next.frontmatter.title}</span>
             </a>
           ) : (
-            <a class="path-link next" href="/#start-here" data-umami-event="next-step-click" data-umami-event-target="path-complete">
+            <a class="path-link next" href={`/#${learningPathId(pos.title)}`} data-umami-event="next-step-click" data-umami-event-target="path-complete">
               <span class="direction">Path complete ✓</span>
               <span class="link-title">Back to the learning paths</span>
             </a>
