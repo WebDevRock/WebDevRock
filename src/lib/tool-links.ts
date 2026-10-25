@@ -13,6 +13,8 @@ export type ToolValues = Record<string, string | number | boolean>;
 export const TOOL_FIELDS: Record<string, { fields: string[]; run: string }> = {
   'list-to-sql': { fields: ['input', 'format', 'header', 'dedupe'], run: 'generate' },
   'json-to-openjson': { fields: ['input', 'path', 'flatten', 'sample', 'temp'], run: 'generate' },
+  'xml-to-nodes': { fields: ['input', 'path', 'child', 'flatten', 'sample', 'temp'], run: 'generate' },
+  'xml-json-converter': { fields: ['input', 'direction', 'prefix', 'root', 'arrays', 'types'], run: 'convert' },
   'data-fix-script': {
     fields: ['action', 'table', 'keys', 'columns', 'mode', 'ticket', 'source', 'set', 'where', 'batched', 'batch-size'],
     run: 'generate',

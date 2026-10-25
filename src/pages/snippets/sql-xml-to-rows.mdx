@@ -1,0 +1,120 @@
+---
+layout: ../../layouts/ContentLayout.astro
+title: "SQL Server: Turn XML Into Rows with nodes()"
+description: "Shred an XML document into rows and typed columns with nodes() and value(), including child rows, attributes and namespaces."
+tags: [sql, sql-server, xml, integrations]
+updated: "2026-10-25"
+sqlVersion: "2008"
+placeholders:
+  - token: "import_table"
+    label: "Table holding the XML"
+    hint: "e.g. dbo.OrderImports"
+---
+
+import OpenInTool from '../../components/OpenInTool.astro';
+
+## Problem
+
+An integration hands you XML (a SOAP response, a supplier feed, an export from an older system) and you need it as rows you can check, join and insert. Reading values one at a time with string functions is fragile and breaks on the first escaped `&amp;`.
+
+## Solution
+
+`nodes()` returns one row per matching element, and `value()` reads a typed value from each one.
+
+```sql
+DECLARE @xml XML = N'
+<orders>
+  <order id="1001" date="2026-10-01">
+    <customer>Acme Ltd</customer>
+    <total>125.50</total>
+    <lines>
+      <line sku="A1" qty="2" price="10.00"/>
+      <line sku="B2" qty="1" price="105.50"/>
+    </lines>
+  </order>
+  <order id="1002" date="2026-10-02">
+    <customer>Example &amp; Sons</customer>
+    <total>40.00</total>
+  </order>
+</orders>';
+
+SELECT
+  o.n.value('@id', 'INT')                                  AS order_id,
+  o.n.value('@date', 'DATE')                               AS order_date,
+  o.n.value('(customer/text())[1]', 'NVARCHAR(200)')       AS customer,
+  o.n.value('(total/text())[1]', 'DECIMAL(18, 2)')         AS total
+FROM @xml.nodes('/orders/order') AS o(n);
+```
+
+`o(n)` names the result: `o` is the table alias and `n` the column holding each `<order>` element. Paths inside `value()` are relative to that element. Attributes are read with `@`, and child element text with `(name/text())[1]`.
+
+### Child rows
+
+Apply `nodes()` again to each parent element to get one row per child, with the parent's values alongside:
+
+```sql
+SELECT
+  o.n.value('@id', 'INT')               AS order_id,
+  l.n.value('@sku', 'NVARCHAR(50)')     AS sku,
+  l.n.value('@qty', 'INT')              AS qty,
+  l.n.value('@price', 'DECIMAL(18, 2)') AS price
+FROM @xml.nodes('/orders/order') AS o(n)
+CROSS APPLY o.n.nodes('lines/line') AS l(n);
+```
+
+Order 1002 has no lines, so `CROSS APPLY` leaves it out. Use `OUTER APPLY` to keep it with `NULL` line columns.
+
+<OpenInTool tool="xml-to-nodes" values={{ input: '<orders>\n  <order id="1001" date="2026-10-01">\n    <customer>Acme Ltd</customer>\n    <lines>\n      <line sku="A1" qty="2" price="10.00"/>\n      <line sku="B2" qty="1" price="105.50"/>\n    </lines>\n  </order>\n</orders>', path: '/orders/order', child: 'lines/line' }} label="Generate this query for your own XML in XML to nodes()" />
+
+### XML stored in a table
+
+When each row holds a document, apply `nodes()` to the column. If the column is `NVARCHAR` rather than `XML`, convert it once in its own `CROSS APPLY`:
+
+```sql
+SELECT
+  i.import_id,
+  o.n.value('@id', 'INT')                            AS order_id,
+  o.n.value('(customer/text())[1]', 'NVARCHAR(200)') AS customer
+FROM import_table i
+CROSS APPLY (SELECT CAST(i.payload AS XML) AS doc) x
+CROSS APPLY x.doc.nodes('/orders/order') AS o(n)
+WHERE x.doc.exist('/orders/order[@id = 1001]') = 1;
+```
+
+`exist()` returns 1 when the path matches anything, which makes it the quickest way to filter documents by their content.
+
+### Namespaces
+
+If the XML declares namespaces, the paths must use them, or nothing matches. Declare them with `WITH XMLNAMESPACES`, which must start the statement:
+
+```sql
+DECLARE @soap XML = N'
+<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
+  <soap:Body>
+    <orders xmlns="urn:example:orders">
+      <order id="1001"><customer>Acme Ltd</customer></order>
+    </orders>
+  </soap:Body>
+</soap:Envelope>';
+
+WITH XMLNAMESPACES (
+  'http://schemas.xmlsoap.org/soap/envelope/' AS soap,
+  'urn:example:orders' AS ord
+)
+SELECT
+  o.n.value('@id', 'INT')                                AS order_id,
+  o.n.value('(ord:customer/text())[1]', 'NVARCHAR(200)') AS customer
+FROM @soap.nodes('/soap:Envelope/soap:Body/ord:orders/ord:order') AS o(n);
+```
+
+The prefix in the query doesn't have to match the document's: `ord` works for the default namespace `xmlns="urn:example:orders"` because the namespace URI is what matches. Attributes without a prefix, like `@id`, are never in a namespace.
+
+## Notes
+
+- **`[1]` is required.** `value()` must read a single value, so wrap child element paths as `(path)[1]`. Leaving it out gives the error *'value()' requires a singleton*.
+- **Use `text()`.** `(customer/text())[1]` reads only the element's own text and is faster. `(customer)[1]` joins the text of everything inside it, and returns an empty string rather than `NULL` for `<customer/>`.
+- **XPath is case-sensitive.** `/Orders/Order` matches nothing in the XML above, and you get no rows, not an error.
+- **Conversion errors stop the whole query.** One `qty="n/a"` fails `value('@qty', 'INT')`. Read doubtful values as `NVARCHAR` and use `TRY_CAST` (SQL Server 2012+) so you can find the bad rows instead.
+- **Encoding declarations:** casting `N'<?xml version="1.0" encoding="UTF-8"?>...'` to `XML` fails with *unable to switch the encoding*, because an `NVARCHAR` string is UTF-16. Cast from `VARCHAR` or `VARBINARY` instead, or remove the declaration.
+- To see what a document looks like as JSON, use the [XML to JSON Converter](/tools/xml-json-converter).
+- For documents of tens of megabytes, see [Query Large XML Documents Without Timeouts](/snippets/sql-query-large-xml).

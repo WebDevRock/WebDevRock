@@ -1,0 +1,115 @@
+---
+// XML to JSON converter, both ways, with the same attribute and array conventions in each direction
+import '../../styles/tools.css';
+---
+
+<div class="tool" data-tool="xml-json-converter" data-pagefind-ignore>
+  <label>
+    XML or JSON (a feed, a SOAP response, a config file, or an API payload)
+    <textarea data-field="input" spellcheck="false" placeholder={'<orders>\n  <order id="1"><customer>Example</customer></order>\n</orders>'}></textarea>
+  </label>
+
+  <div class="tool-row">
+    <label>
+      Convert
+      <select data-field="direction">
+        <option value="auto">Detect from input</option>
+        <option value="xml-to-json">XML to JSON</option>
+        <option value="json-to-xml">JSON to XML</option>
+      </select>
+    </label>
+    <label>
+      Attribute prefix
+      <input type="text" data-field="prefix" value="@" spellcheck="false" />
+    </label>
+    <label>
+      Root element (JSON to XML)
+      <input type="text" data-field="root" value="root" spellcheck="false" />
+    </label>
+  </div>
+
+  <div class="tool-row">
+    <label>
+      Always arrays (XML to JSON, comma-separated element names)
+      <input type="text" data-field="arrays" placeholder="order, line" spellcheck="false" />
+    </label>
+    <label class="tool-check">
+      <input type="checkbox" data-field="types" />
+      Read numbers and true/false as JSON values
+    </label>
+  </div>
+
+  <div class="tool-actions">
+    <button type="button" class="primary" data-field="convert">Convert</button>
+    <button type="button" data-field="copy">Copy</button>
+    <button type="button" data-field="swap">Convert back</button>
+  </div>
+
+  <p class="tool-status" data-field="status" aria-live="polite"></p>
+
+  <label>
+    <span data-field="output-label">Result</span>
+    <textarea data-field="output" readonly spellcheck="false"></textarea>
+  </label>
+</div>
+
+<script>
+  import { trackToolUse } from '../../scripts/analytics';
+  import { field, setStatus, wireCopyButton } from '../../scripts/tool-ui';
+  import { wireToolState } from '../../scripts/tool-state';
+  import { splitList } from '../../scripts/tools/sql-format';
+  import { convertXmlJson, type XmlJsonDirection } from '../../scripts/tools/xml-json';
+
+  const root = document.querySelector<HTMLElement>('[data-tool="xml-json-converter"]');
+
+  if (root) {
+    const input = field<HTMLTextAreaElement>(root, 'input');
+    const direction = field<HTMLSelectElement>(root, 'direction');
+    const prefix = field<HTMLInputElement>(root, 'prefix');
+    const rootName = field<HTMLInputElement>(root, 'root');
+    const arrays = field<HTMLInputElement>(root, 'arrays');
+    const types = field<HTMLInputElement>(root, 'types');
+    const output = field<HTMLTextAreaElement>(root, 'output');
+    const outputLabel = field<HTMLElement>(root, 'output-label');
+    const status = field<HTMLElement>(root, 'status');
+    const convert = field<HTMLButtonElement>(root, 'convert');
+    let lastDirection: 'xml-to-json' | 'json-to-xml' | undefined;
+
+    convert.addEventListener('click', () => {
+      try {
+        const result = convertXmlJson(input.value, {
+          direction: direction.value as XmlJsonDirection,
+          attributePrefix: prefix.value.trim(),
+          arrays: splitList(arrays.value),
+          types: types.checked,
+          root: rootName.value,
+        });
+        output.value = result.output;
+        lastDirection = result.direction;
+        outputLabel.textContent = result.direction === 'xml-to-json' ? 'JSON' : 'XML';
+
+        const message = `${result.direction === 'xml-to-json' ? 'XML to JSON' : 'JSON to XML'} · ${result.elements.toLocaleString()} element${result.elements === 1 ? '' : 's'}`;
+        setStatus(status, [message, ...result.warnings].join(' · '), result.warnings.length ? 'warn' : 'info');
+        trackToolUse('xml-json-converter', result.direction);
+      } catch (err) {
+        output.value = '';
+        lastDirection = undefined;
+        outputLabel.textContent = 'Result';
+        setStatus(status, (err as Error).message, 'error');
+      }
+    });
+
+    // Feed the result back in the other way, to check a round trip keeps what you need
+    field<HTMLButtonElement>(root, 'swap').addEventListener('click', () => {
+      if (!output.value || !lastDirection) return;
+      input.value = output.value;
+      direction.value = lastDirection === 'xml-to-json' ? 'json-to-xml' : 'xml-to-json';
+      convert.click();
+    });
+
+    wireCopyButton(field<HTMLButtonElement>(root, 'copy'), () => output.value, 'xml-json-converter');
+
+    // Share links, and restoring inputs from a link (after the handlers above, so the result can be shown)
+    wireToolState(root, 'xml-json-converter', status);
+  }
+</script>

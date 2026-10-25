@@ -1,0 +1,25 @@
+---
+layout: ../../layouts/ContentLayout.astro
+title: "XML to nodes() Query Generator"
+description: "Paste a sample XML document and get a SQL Server nodes()/value() query, with column types inferred from the data and child rows shredded with CROSS APPLY."
+tags: [sql-server, xml, integrations, tool]
+updated: "2026-10-25"
+---
+
+import XmlToNodes from '../../components/tools/XmlToNodes.astro';
+
+Paste a supplier feed, a SOAP response, or an export file and get a `nodes()` query that turns it into rows with typed columns. Everything runs in your browser; nothing is sent anywhere.
+
+<XmlToNodes />
+
+## Notes
+
+- **Rows:** if you leave the path empty, the rows are the first element that repeats, such as each `<order>` in `<orders>`. Set the path yourself, for example `/orders/order`, to choose a different one. Paths go down from the root element and are case-sensitive.
+- **Child rows:** enter a path relative to each row, such as `lines/line`, to get one row per child with the parent's columns repeated alongside, using `CROSS APPLY`. Without one, repeated elements come back as an `XML` column from `query()`, and the tool suggests the path to use.
+- **Types are a starting point:** they come from the sample only. Values with leading zeros, such as `00123`, stay `NVARCHAR` so the zeros aren't lost. A column that is mostly numbers with the odd `n/a` is flagged, because a numeric type would fail the whole query on that one value.
+- **Dates:** ISO 8601 values become `DATE`, `DATETIME2`, or `DATETIMEOFFSET` (when they include `Z` or an offset). `true` and `false` become `BIT`.
+- **Nested elements** are flattened into `parent_child` columns. Untick the option to get each nested element back whole as an `XML` column instead.
+- **Namespaces** are declared with `WITH XMLNAMESPACES`, using the document's own prefixes where it has them and `ns` for a default namespace.
+- **The sample in `DECLARE`** has its `<?xml ... encoding="UTF-8"?>` declaration removed, because SQL Server refuses to cast an `N'...'` string that declares a different encoding.
+
+The generated query follows [Turn XML Into Rows with nodes()](/snippets/sql-xml-to-rows). For files of tens of megabytes, use the #temp table option and see [Query Large XML Documents Without Timeouts](/snippets/sql-query-large-xml). To see the document as JSON instead, use the [XML to JSON Converter](/tools/xml-json-converter).

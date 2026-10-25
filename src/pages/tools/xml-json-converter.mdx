@@ -1,0 +1,58 @@
+---
+layout: ../../layouts/ContentLayout.astro
+title: "XML to JSON Converter"
+description: "Convert XML to JSON and JSON back to XML, with attributes, repeated elements and namespaces handled the same way in both directions."
+tags: [sql-server, xml, json, integrations, tool]
+updated: "2026-10-25"
+---
+
+import XmlJsonConverter from '../../components/tools/XmlJsonConverter.astro';
+
+Paste a SOAP response, an XML feed, or a JSON payload and convert it the other way. The input is detected automatically. Everything runs in your browser; nothing is sent anywhere.
+
+<XmlJsonConverter />
+
+## How the two formats map
+
+```xml
+<order id="7" status="open">
+  <customer>Acme</customer>
+  <line sku="A1">Widget</line>
+  <line sku="B2">Gadget</line>
+  <note/>
+</order>
+```
+
+converts to, and back from:
+
+```json
+{
+  "order": {
+    "@id": "7",
+    "@status": "open",
+    "customer": "Acme",
+    "line": [
+      { "@sku": "A1", "#text": "Widget" },
+      { "@sku": "B2", "#text": "Gadget" }
+    ],
+    "note": null
+  }
+}
+```
+
+- **Attributes** become properties starting with the prefix (`@` by default). Going the other way, any property starting with the prefix becomes an attribute.
+- **Text** is the value itself, unless the element also has attributes or children: then it goes in `#text`.
+- **Repeated elements** become an array. An element that appears once becomes a single value, so the same XML schema can give different JSON shapes. List element names under **Always arrays** to make them arrays every time, which is what you want before reading the JSON with `OPENJSON`.
+- **Empty elements**, `<note/>` and `<note></note>`, become `null`.
+- **Namespaces:** prefixed names such as `x:code` are kept as written, and `xmlns` declarations become attributes, so converting back gives the same XML.
+
+## Notes
+
+- **Everything is text by default.** XML has no numbers or booleans, so `00123` and `12.50` stay exactly as written. Tick the types option to get JSON numbers and `true`/`false`; values with leading zeros, and whole numbers too long for JavaScript to hold exactly, still stay as text.
+- **Lost in conversion:** comments, processing instructions, the `<?xml ?>` declaration, and the position of text between child elements (mixed content, such as HTML-like markup). The tool warns when it finds mixed content.
+- **JSON to XML** needs a single root element. A JSON object with one property uses that property as the root; anything else is wrapped in the root element name you set. Array items inside an array become `<item>` elements.
+- **Names** that aren't valid in XML, such as `order id` or `1st`, are changed to `order_id` and `_1st`, and the tool lists what it changed.
+- **Long numbers:** a JSON number with 16 or more digits is already rounded by the time it's read. Send long ids as strings.
+- **Convert back** runs the result through the other way, so you can check a round trip keeps everything you need.
+
+To query the XML in SQL Server instead of converting it, the [XML to nodes() Query Generator](/tools/xml-to-nodes) writes the query from a sample. For the details, see [Turn XML Into Rows with nodes()](/snippets/sql-xml-to-rows) and [Query Large XML Documents Without Timeouts](/snippets/sql-query-large-xml). To convert inside the database, see [Convert Between XML and JSON in SQL Server](/snippets/sql-xml-json-convert). Once you have JSON, [JSON to OPENJSON](/tools/json-to-openjson) writes the query to read it.

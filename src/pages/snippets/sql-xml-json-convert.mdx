@@ -1,0 +1,97 @@
+---
+layout: ../../layouts/ContentLayout.astro
+title: "SQL Server: Convert Between XML and JSON"
+description: "Turn XML into JSON with nodes() and FOR JSON, and JSON into XML with OPENJSON and FOR XML PATH, keeping nested rows nested."
+tags: [sql, sql-server, xml, json, integrations]
+updated: "2026-10-25"
+sqlVersion: "2016"
+sqlNote: "FOR JSON and OPENJSON also need database compatibility level 130 or higher."
+---
+
+import OpenInTool from '../../components/OpenInTool.astro';
+
+## Problem
+
+One system sends XML and the next one wants JSON, or the other way round, and the conversion has to happen in the database: in a stored procedure, a job, or a staging step. SQL Server has no function that converts one to the other directly.
+
+## Solution
+
+Read the source into rows, then write the rows out in the other format. A correlated subquery with its own `FOR JSON` or `FOR XML` keeps child rows nested inside their parent.
+
+### XML to JSON
+
+```sql
+DECLARE @xml XML = N'
+<orders>
+  <order id="1001">
+    <customer>Acme Ltd</customer>
+    <lines>
+      <line sku="A1" qty="2"/>
+      <line sku="B2" qty="1"/>
+    </lines>
+  </order>
+</orders>';
+
+SELECT
+  o.n.value('@id', 'INT')                            AS id,
+  o.n.value('(customer/text())[1]', 'NVARCHAR(200)') AS customer,
+  (
+    SELECT
+      l.n.value('@sku', 'NVARCHAR(50)') AS sku,
+      l.n.value('@qty', 'INT')          AS qty
+    FROM o.n.nodes('lines/line') AS l(n)
+    FOR JSON PATH
+  ) AS lines
+FROM @xml.nodes('/orders/order') AS o(n)
+FOR JSON PATH, ROOT('orders');
+```
+
+```json
+{"orders":[{"id":1001,"customer":"Acme Ltd","lines":[{"sku":"A1","qty":2},{"sku":"B2","qty":1}]}]}
+```
+
+Because the values are read with types, `id` and `qty` come out as JSON numbers, and every order's `lines` is an array even when it has one line. A dot in a column alias, such as `[customer.name]`, nests the value in an object.
+
+### JSON to XML
+
+```sql
+DECLARE @json NVARCHAR(MAX) = N'{
+  "orders": [
+    { "id": 1001, "customer": "Acme Ltd",
+      "lines": [ { "sku": "A1", "qty": 2 }, { "sku": "B2", "qty": 1 } ] }
+  ]
+}';
+
+SELECT
+  o.id       AS [@id],
+  o.customer AS [customer],
+  (
+    SELECT l.sku AS [@sku], l.qty AS [@qty]
+    FROM OPENJSON(o.lines) WITH (sku NVARCHAR(50), qty INT) AS l
+    FOR XML PATH('line'), TYPE
+  ) AS [lines]
+FROM OPENJSON(@json, '$.orders')
+WITH (
+  id       INT,
+  customer NVARCHAR(200),
+  lines    NVARCHAR(MAX) AS JSON
+) AS o
+FOR XML PATH('order'), ROOT('orders');
+```
+
+```xml
+<orders><order id="1001"><customer>Acme Ltd</customer><lines><line sku="A1" qty="2"/><line sku="B2" qty="1"/></lines></order></orders>
+```
+
+In `FOR XML PATH`, an alias starting with `@` becomes an attribute and any other alias becomes a child element. `TYPE` returns the inner result as XML, so it's nested rather than escaped as text.
+
+<OpenInTool tool="xml-json-converter" values={{ input: '<orders>\n  <order id="1001">\n    <customer>Acme Ltd</customer>\n    <lines>\n      <line sku="A1" qty="2"/>\n      <line sku="B2" qty="1"/>\n    </lines>\n  </order>\n</orders>', arrays: 'order, line', types: true }} label="Compare with a direct conversion in the XML to JSON Converter" />
+
+## Notes
+
+- **You choose the shape.** Unlike a generic converter, these queries only output the fields you name, with the names and types the receiving system expects. That is usually what an integration wants anyway.
+- **NULLs are left out.** `FOR JSON` omits `NULL` values unless you add `INCLUDE_NULL_VALUES`, and `FOR XML PATH` omits `NULL` elements unless you add `ELEMENTS XSINIL`. An order with no lines has no `lines` property at all.
+- **Keep the XML as text inside JSON:** to send a whole XML document as one JSON string, select `CAST(@xml AS NVARCHAR(MAX))`. `FOR JSON` escapes the quotes for you.
+- **Without `TYPE`**, a nested `FOR XML` comes back as a string and its `<` and `>` are escaped to `&lt;` and `&gt;` in the outer document.
+- **Unknown or changing shapes** are hard to convert in SQL, because the columns have to be named in the query. For a one-off, or to see what a document looks like as JSON before writing the query, use the [XML to JSON Converter](/tools/xml-json-converter), then [JSON to OPENJSON](/tools/json-to-openjson) to generate the query that reads it.
+- For the XML side in more detail, see [Turn XML Into Rows with nodes()](/snippets/sql-xml-to-rows). For the JSON side, see [Pass a List of IDs Without Dynamic SQL](/snippets/sql-pass-id-list).

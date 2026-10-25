@@ -1,0 +1,102 @@
+---
+// XML to nodes() generator: infers value() columns and types from a sample XML document
+import '../../styles/tools.css';
+---
+
+<div class="tool" data-tool="xml-to-nodes" data-pagefind-ignore>
+  <label>
+    Sample XML (a feed, a SOAP response, or an export file)
+    <textarea data-field="input" spellcheck="false" placeholder={'<orders>\n  <order id="1"><customer>Example</customer></order>\n  <order id="2"><customer>Another</customer></order>\n</orders>'}></textarea>
+  </label>
+
+  <div class="tool-row">
+    <label>
+      Path to the rows (leave empty to detect)
+      <input type="text" data-field="path" placeholder="/orders/order" spellcheck="false" />
+    </label>
+    <label>
+      Child rows, relative to each row (optional)
+      <input type="text" data-field="child" placeholder="lines/line" spellcheck="false" />
+    </label>
+  </div>
+
+  <div class="tool-row">
+    <label class="tool-check">
+      <input type="checkbox" data-field="flatten" checked />
+      Flatten nested elements
+    </label>
+    <label class="tool-check">
+      <input type="checkbox" data-field="sample" checked />
+      Include sample in DECLARE
+    </label>
+    <label class="tool-check">
+      <input type="checkbox" data-field="temp" />
+      SELECT INTO #xml_rows
+    </label>
+  </div>
+
+  <div class="tool-actions">
+    <button type="button" class="primary" data-field="generate">Generate SQL</button>
+    <button type="button" data-field="copy">Copy</button>
+  </div>
+
+  <p class="tool-status" data-field="status" aria-live="polite"></p>
+
+  <label>
+    SQL
+    <textarea data-field="output" readonly spellcheck="false"></textarea>
+  </label>
+</div>
+
+<script>
+  import { trackToolUse } from '../../scripts/analytics';
+  import { field, setStatus, wireCopyButton } from '../../scripts/tool-ui';
+  import { wireToolState } from '../../scripts/tool-state';
+  import { buildXmlNodes } from '../../scripts/tools/xml-to-nodes';
+
+  const root = document.querySelector<HTMLElement>('[data-tool="xml-to-nodes"]');
+
+  if (root) {
+    const input = field<HTMLTextAreaElement>(root, 'input');
+    const path = field<HTMLInputElement>(root, 'path');
+    const child = field<HTMLInputElement>(root, 'child');
+    const flatten = field<HTMLInputElement>(root, 'flatten');
+    const sample = field<HTMLInputElement>(root, 'sample');
+    const temp = field<HTMLInputElement>(root, 'temp');
+    const output = field<HTMLTextAreaElement>(root, 'output');
+    const status = field<HTMLElement>(root, 'status');
+
+    field<HTMLButtonElement>(root, 'generate').addEventListener('click', () => {
+      try {
+        const result = buildXmlNodes(input.value, {
+          path: path.value,
+          child: child.value,
+          flatten: flatten.checked,
+          includeSample: sample.checked,
+          intoTemp: temp.checked,
+        });
+        output.value = result.sql;
+        if (!path.value.trim()) path.placeholder = result.path;
+        if (!child.value.trim()) child.placeholder = result.suggestedChild ?? 'lines/line';
+
+        const plural = (n: number, word: string) => `${n.toLocaleString()} ${word}${n === 1 ? '' : 's'}`;
+        const parts = [`${plural(result.columns.length, 'column')} from ${plural(result.rows, 'row')} at ${result.path}`];
+        if (result.child) parts.push(`${plural(result.child.rows, 'child row')} at ${result.child.path}`);
+        if (result.suggestedChild) parts.push(`${result.suggestedChild} repeats: enter it as child rows to get one row each`);
+        const noted = result.columns.filter((c) => c.note && c.type !== 'XML').length;
+        if (noted) parts.push(`${plural(noted, 'column')} need a type check (see comments)`);
+
+        setStatus(status, parts.join(' · '), noted ? 'warn' : 'info');
+        trackToolUse('xml-to-nodes', 'generate');
+      } catch (err) {
+        output.value = '';
+        setStatus(status, (err as Error).message, 'error');
+      }
+    });
+
+    wireCopyButton(field<HTMLButtonElement>(root, 'copy'), () => output.value, 'xml-to-nodes');
+
+    // Share links, and restoring inputs from a link (after the handlers above, so the result can be shown)
+    wireToolState(root, 'xml-to-nodes', status);
+  }
+</script>

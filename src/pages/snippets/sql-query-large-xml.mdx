@@ -1,0 +1,138 @@
+---
+layout: ../../layouts/ContentLayout.astro
+title: "SQL Server: Query Large XML Documents Without Timeouts"
+description: "Why shredding a big XML file with nodes() can take minutes, and the changes that bring it back to seconds: no parent axis, full paths, text(), and shredding once."
+tags: [sql, sql-server, xml, performance, integrations]
+updated: "2026-10-25"
+sqlVersion: "2008"
+sqlNote: "Selective XML indexes need SQL Server 2012 SP1 or later."
+placeholders:
+  - token: "import_table"
+    label: "Table holding the XML"
+    hint: "e.g. dbo.OrderImports"
+---
+
+## Problem
+
+A query that shreds a small XML sample in milliseconds runs for minutes, or never finishes, against the real 50 MB file. The XML methods are not slow in themselves: a few common habits make SQL Server walk the whole document again for every row.
+
+## Solution
+
+### 1. Load the file once, into an XML variable
+
+```sql
+DECLARE @xml XML;
+
+SELECT @xml = CAST(f.BulkColumn AS XML)
+FROM OPENROWSET(BULK 'D:\imports\orders.xml', SINGLE_BLOB) AS f;
+```
+
+`SINGLE_BLOB` reads the raw bytes, so SQL Server honours the file's own `encoding` declaration. The path is on the database server, not your machine. Parsing happens once here, instead of every time a query casts text to `XML`.
+
+### 2. Go down from the parent instead of up with `..`
+
+The most common cause of slow shredding is reading parent values with the parent axis:
+
+```sql
+-- Slow: every line looks back up the document for its order
+SELECT
+  l.n.value('../../@id', 'INT')     AS order_id,
+  l.n.value('@sku', 'NVARCHAR(50)') AS sku
+FROM @xml.nodes('//line') AS l(n);
+```
+
+Start at the parent and apply `nodes()` to it, so each order's values are read once:
+
+```sql
+-- Fast: one pass down the tree
+SELECT
+  o.n.value('@id', 'INT')               AS order_id,
+  l.n.value('@sku', 'NVARCHAR(50)')     AS sku,
+  l.n.value('@qty', 'INT')              AS qty,
+  l.n.value('@price', 'DECIMAL(18, 2)') AS price
+FROM @xml.nodes('/orders/order') AS o(n)
+CROSS APPLY o.n.nodes('lines/line') AS l(n);
+```
+
+On large documents this change alone often turns minutes into seconds.
+
+### 3. Use full paths and `text()`
+
+- `//line` searches every level of the document. `/orders/order/lines/line` goes straight there.
+- `(customer/text())[1]` reads the element's text. `(customer)[1]` builds the text of the element and everything inside it first, which is more work and gives `''` instead of `NULL` for empty elements.
+
+### 4. Shred once into #temp tables, then query those
+
+If you need to check, join or aggregate the data, don't run several queries against the XML. Shred each level into a #temp table once, index it, and work from there:
+
+```sql
+SELECT
+  o.n.value('@id', 'INT')                            AS order_id,
+  o.n.value('@date', 'DATE')                         AS order_date,
+  o.n.value('(customer/text())[1]', 'NVARCHAR(200)') AS customer
+INTO #orders
+FROM @xml.nodes('/orders/order') AS o(n);
+
+SELECT
+  o.n.value('@id', 'INT')               AS order_id,
+  l.n.value('@sku', 'NVARCHAR(50)')     AS sku,
+  l.n.value('@qty', 'INT')              AS qty,
+  l.n.value('@price', 'DECIMAL(18, 2)') AS price
+INTO #order_lines
+FROM @xml.nodes('/orders/order') AS o(n)
+CROSS APPLY o.n.nodes('lines/line') AS l(n);
+
+CREATE CLUSTERED INDEX IX_orders ON #orders (order_id);
+CREATE CLUSTERED INDEX IX_order_lines ON #order_lines (order_id);
+```
+
+The #temp tables have statistics, so later joins get sensible plans. Estimates on XML methods are fixed guesses, whatever the document's size.
+
+### 5. Try OPENXML for one very large document
+
+`OPENXML` parses the document into an in-memory tree first. That costs memory, but looking up parent values is cheap, and for some very large files it is faster than `nodes()`:
+
+```sql
+DECLARE @doc INT;
+EXEC sp_xml_preparedocument @doc OUTPUT, @xml;
+
+SELECT order_id, sku, qty, price
+FROM OPENXML(@doc, '/orders/order/lines/line')
+WITH (
+  order_id INT            '../../@id',
+  sku      NVARCHAR(50)   '@sku',
+  qty      INT            '@qty',
+  price    DECIMAL(18, 2) '@price'
+);
+
+EXEC sp_xml_removedocument @doc;
+```
+
+Always call `sp_xml_removedocument`, including when an error stops the batch partway: the parsed document stays in memory for the rest of the session otherwise. SQL Server lets these documents use up to an eighth of its memory, so measure both approaches against the real file before choosing.
+
+### 6. Many documents in a table: index the XML column
+
+When you store each message in a table and search them, an XML index saves parsing every document on every query. Both kinds need a clustered primary key on the table.
+
+```sql
+-- Speeds up any XML query on the column, but can be several times the size of the data
+CREATE PRIMARY XML INDEX PXML_import_table_payload ON import_table (payload);
+
+-- Or index only the paths you query (SQL Server 2012 SP1+): much smaller
+CREATE SELECTIVE XML INDEX SXI_import_table_payload
+ON import_table (payload)
+FOR (
+  order_id = '/orders/order/@id' AS XQUERY 'xs:double',
+  customer = '/orders/order/customer/text()' AS XQUERY 'xs:string' MAXLENGTH(200)
+);
+```
+
+These help `exist()` and `value()` queries that filter documents. They don't speed up shredding a single document held in a variable.
+
+## Notes
+
+- **Check the plan.** A *Table Valued Function [XML Reader with XPath filter]* operator with a large row count in the actual plan usually points to `..` or `//`.
+- **Typed XML** (bound to an XML schema collection) is validated on every load and update. For staging, untyped XML is simpler and faster.
+- **Split work, not the document:** if a single shred still takes too long, shred into #temp tables first and run your checks and inserts in [batches](/snippets/sql-batch-update-delete) from there.
+- **Writing the query:** the [XML to nodes() Query Generator](/tools/xml-to-nodes) writes the shredding query from a sample of the file, going down from the parent with `CROSS APPLY` as in step 2.
+- **Converting instead:** if the next system wants JSON, see [Convert Between XML and JSON in SQL Server](/snippets/sql-xml-json-convert), or convert a sample by hand in the [XML to JSON Converter](/tools/xml-json-converter).

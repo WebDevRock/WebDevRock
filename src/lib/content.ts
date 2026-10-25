@@ -45,6 +45,7 @@ export const HOME_TASKS = [
   { label: 'Update or delete millions of rows', path: '/snippets/sql-batch-update-delete/' },
   { label: 'Turn a spreadsheet list into SQL', path: '/tools/list-to-sql/' },
   { label: 'Read a JSON payload in SQL Server', path: '/tools/json-to-openjson/' },
+  { label: 'Read an XML file in SQL Server', path: '/tools/xml-to-nodes/' },
   { label: 'Stop an integration creating duplicates', path: '/patterns/integration-jobs-safe-to-rerun/' },
   { label: 'Retry a flaky API without hammering it', path: '/patterns/handling-unreliable-external-apis/' },
 ];
