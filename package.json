@@ -9,6 +9,7 @@
     "preview": "astro preview",
     "astro": "astro",
     "deploy": "npm run build && powershell -ExecutionPolicy Bypass -File .\\deploy.ps1",
+    "indexnow": "node scripts/indexnow.mjs",
     "report": "node --env-file-if-exists=.env.production --env-file-if-exists=.env.report scripts/content-report.mjs"
   },
   "dependencies": {

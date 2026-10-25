@@ -16,3 +16,8 @@ $RELEASE_DIR  = "$REMOTE_ROOT/.webdevrock.uk_release"
 & $SCP -i $KEY -r ".\dist\*" "$DROPLET_USER@$DROPLET_HOST`:$RELEASE_DIR/"
 
 & $SSH -i $KEY "$DROPLET_USER@$DROPLET_HOST" "rm -rf $SITE_DIR && mv $RELEASE_DIR $SITE_DIR && find $SITE_DIR -type d -exec chmod 755 {} \; && find $SITE_DIR -type f -exec chmod 644 {} \;"
+
+# Tell Bing and the other IndexNow search engines which pages changed (see scripts/indexnow.mjs).
+# A failed submission doesn't fail the deploy: run npm run indexnow again later.
+node scripts/indexnow.mjs
+if ($LASTEXITCODE -ne 0) { Write-Warning "IndexNow submission failed; the deploy itself succeeded." }

@@ -35,3 +35,6 @@ desktop.ini
 # IDE
 .vscode/
 .idea/
+
+# what scripts/indexnow.mjs last submitted, so it only sends changed pages
+.indexnow-state.json
