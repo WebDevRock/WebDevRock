@@ -74,6 +74,17 @@ export const LEARNING_PATHS = [
       '/tools/retry-schedule/',
     ],
   },
+  {
+    title: 'Work with XML in SQL Server',
+    summary: 'From shredding a small document into rows to large files and converting to JSON.',
+    steps: [
+      '/snippets/sql-xml-to-rows/',
+      '/tools/xml-to-nodes/',
+      '/snippets/sql-query-large-xml/',
+      '/snippets/sql-xml-json-convert/',
+      '/tools/xml-json-converter/',
+    ],
+  },
 ];
 
 // Raw source, not the compiled MDX modules: importing those would make Astro treat every page using
