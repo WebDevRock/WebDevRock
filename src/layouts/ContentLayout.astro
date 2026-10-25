@@ -23,7 +23,7 @@ const { title, description, tags, updated, placeholders, sqlVersion, sqlNote, le
 const path = normalisePath(Astro.url.pathname);
 const section = SECTIONS.find((s) => s.key === path.split('/')[1]);
 
-// schema.org: tools are browser apps, everything else is a technical article
+// schema.org: tools are browser apps, everything else is an article (and, more specifically, a technical one)
 const url = new URL(path, Astro.site).href;
 const publisher = { '@type': 'Organization', name: 'WebDevRock', url: new URL('/', Astro.site).href };
 const common = {
@@ -48,7 +48,9 @@ const structuredData =
       }
     : {
         ...common,
-        '@type': 'TechArticle',
+        // Google's Article rich result only accepts Article, NewsArticle and BlogPosting; TechArticle keeps the
+        // more specific type (and its proficiencyLevel and dependencies) for everything else that reads it
+        '@type': ['Article', 'TechArticle'],
         headline: title,
         mainEntityOfPage: url,
         image: new URL('/og-default.png', Astro.site).href,
