@@ -1,0 +1,147 @@
+---
+layout: ../../layouts/ContentLayout.astro
+title: "How to Read a SQL Server Execution Plan, in 3D"
+description: "An interactive 3D execution plan viewer. See where a query's cost goes, why a scan, a key lookup or a bad estimate slows it down, or paste your own plan."
+tags: [threejs, visualization, sql-server, performance]
+updated: "2026-11-01"
+---
+
+import ExecutionPlan3D from '../../components/ExecutionPlan3D.astro';
+
+## Overview
+
+Before SQL Server runs a query, it decides *how* to run it: which indexes to use, which order to join tables in, and whether to sort or hash. That decision is the **execution plan**. When a query is slow, the plan usually says why, but the standard diagram of small icons and arrows takes practice to read.
+
+This demo draws a plan in 3D:
+
+- Each **operator**, one step of the plan, is a tower. Its height is that step's share of the query's estimated cost, so the expensive step stands out at a glance.
+- Rows travel between operators along **pipes**. The thicker the pipe, the more rows. The moving dots show the direction: data flows from the right, where tables are read, towards the statement on the left, where results come out.
+- The layout follows SQL Server Management Studio (SSMS). Each operator's inputs are to its right, with the first input level with it and any others in rows in front.
+
+The five sample plans come from a small `Shop` database, with 250,000 orders and 20,000 customers. They tell one story about finding a customer's orders, followed by two common problems. You can also paste a plan of your own.
+
+## Demo
+
+<ExecutionPlan3D />
+
+Select any tower, or any operator in the list, to see what it does, how many rows it expected and got, and any warnings. Drag to turn the view, and use **+** and **−** to zoom.
+
+## The samples
+
+### 1. Orders for one customer, with no index
+
+```sql
+SELECT OrderId, OrderDate, Total FROM dbo.Orders WHERE CustomerId = 1027;
+```
+
+One tower, at 100% of the cost: a **Clustered Index Scan**. The table is stored in `OrderId` order, so the only way to find customer 1027's orders is to read all 250,000 rows and keep the 11 that match. The details show the condition it checks on every row, and **Rows read: 250,000** against **Actual rows: 11**.
+
+SQL Server noticed, and the plan includes a **missing index** suggestion. The demo turns it into a `CREATE INDEX` statement. A plan can hold several suggestions, and SSMS's graphical plan shows only one of them, so the demo lists every suggestion in the XML. Treat them as hints: SQL Server makes each suggestion for this one query, without considering your other indexes.
+
+### 2. The same query, with an index
+
+```sql
+CREATE INDEX IX_Orders_CustomerId ON dbo.Orders (CustomerId);
+```
+
+The estimated cost falls from 2.13 to 0.04. The plan now has two branches joined by a **Nested Loops** operator. An **Index Seek** goes straight to the customer's entries in the new index. The index only holds `CustomerId` and the table's key, `OrderId`, though, so for each of the 11 rows a **Key Lookup** fetches `OrderDate` and `Total` from the table. The lookups are now the tallest tower, at 92% of a much smaller cost.
+
+For 11 rows that's fine. For a customer with 50,000 orders, it's 50,000 separate lookups, and SQL Server may decide a scan is cheaper after all.
+
+### 3. With a covering index
+
+```sql
+CREATE INDEX IX_Orders_CustomerId ON dbo.Orders (CustomerId)
+INCLUDE (OrderDate, Total)
+WITH (DROP_EXISTING = ON);
+```
+
+Now the index holds every column the query uses, so it *covers* the query. The plan is a single Index Seek, and the cost falls again, to 0.003. That's about 650 times less than the scan in sample 1.
+
+### 4. Monthly sales report
+
+```sql
+SELECT c.City, COUNT(*) AS Orders, SUM(o.Total) AS Revenue
+FROM dbo.Orders AS o
+JOIN dbo.Customers AS c ON c.CustomerId = o.CustomerId
+WHERE o.OrderDate >= '20261001' AND o.OrderDate < '20261101'
+GROUP BY c.City
+ORDER BY Revenue DESC;
+```
+
+This is an **actual** plan, so as well as the estimates it records what really happened. The scan of Orders expected 8,000 October orders and found 31,204. The statistics on `OrderDate` were last updated before most of October's orders were loaded, so SQL Server's picture of the data was out of date.
+
+That one wrong estimate has a knock-on effect. A **Hash Match** join builds a hash table in memory from its first input, here the Orders rows, and the memory it gets is worked out before the query runs, from the estimate. It got enough for about 8,000 rows, received nearly four times as many, and **spilled to tempdb**: it wrote the overflow to disk and read it back. The warning icon on the tower and the details panel both show it. Updating the statistics, for example with `UPDATE STATISTICS dbo.Orders;`, gives the next run an accurate estimate.
+
+### 5. Find a customer by phone number
+
+```sql
+SELECT CustomerId, FirstName, Surname FROM dbo.Customers WHERE Phone = N'07700 900123';
+```
+
+`Phone` is a `varchar` column with an index. The application sends the number as `nvarchar` (the `N` prefix), as many data access libraries do for strings by default. `nvarchar` ranks above `varchar` in SQL Server's data type precedence, so the column is converted to match the value, not the other way round. The plan shows the conversion as `CONVERT_IMPLICIT` in the condition, and a warning that it affects whether an index can be seeked.
+
+The result is an **Index Scan** of all 20,000 entries to find one customer. Passing the value as `varchar`, the column's own type, gives a seek. How badly a conversion hurts depends on the types and the collation: in some cases SQL Server can still seek over a range. The warning in the plan tells you when it couldn't.
+
+## Reading any plan
+
+The same few questions work for every plan, in 3D or in SSMS:
+
+1. **Where is the cost?** Find the tallest tower, the operator with the highest cost percentage. Start there.
+2. **How many rows go in and out?** A thick pipe going into an operator and a thin one coming out means it read far more than it needed. A scan that reads 250,000 rows to return 11 is the classic case.
+3. **Were the estimates right?** In an actual plan, compare estimated and actual rows. The demo marks pipes where they differ by three times or more. Plans are built on estimates, so a big miss can explain a bad choice of join, too little memory, or a scan where a seek would do.
+4. **Any warnings?** Spills, implicit conversions, and joins without a join condition all appear as warnings on an operator or on the statement.
+
+Two things to bear in mind:
+
+- **Costs are estimates, even in an actual plan.** Microsoft describes an actual plan as the compiled plan plus run-time information. The row counts and warnings are what happened, but the costs are still the ones worked out before the query ran. In sample 4, the scan's 69% is based on the 8,000 rows it expected, not the 31,204 it got. Treat costs as a guide to where to look, and the actual rows and warnings as what happened.
+- **Costs aren't seconds.** They're a relative measure for comparing ways of running the same query. They're useful for spotting the expensive step, but not for timing anything.
+
+## Getting a plan from SQL Server
+
+- **In SSMS:** choose **Include Actual Execution Plan** (Ctrl+M) before running a query, or **Display Estimated Execution Plan** (Ctrl+L) to see the plan without running it. In the plan tab, right-click and choose **Show Execution Plan XML** to copy the XML, or **Save Execution Plan As** to save a .sqlplan file.
+- **In T-SQL:** `SET STATISTICS XML ON` returns the actual plan as XML alongside the results. `SET SHOWPLAN_XML ON` returns the estimated plan without running the query.
+- **From the plan cache or Query Store:** plans for queries that have already run are available from `sys.dm_exec_query_plan` and from Query Store. The plan cache holds the compiled, estimated plan, so these don't include actual row counts.
+
+The demo reads the plan entirely in your browser. Nothing is uploaded, but a plan contains your query text and table names, so take care where else you paste it.
+
+## How the demo is built
+
+### Parsing the plan
+
+A plan is XML in the `ShowPlanXML` format. Every operator is a `RelOp` element with attributes such as `PhysicalOp`, `EstimateRows` and `EstimatedTotalSubtreeCost`, and its inputs are `RelOp` elements nested inside it. The parser uses the browser's `DOMParser` and walks that tree:
+
+```javascript
+// The RelOp elements directly below this one, in plan order
+function childRelOps(el) {
+  const out = [];
+  const walk = (e) => {
+    for (const c of e.children) {
+      if (c.localName === 'RelOp') out.push(c);
+      else walk(c); // step through wrappers such as <NestedLoops> or <Hash>
+    }
+  };
+  walk(el);
+  return out;
+}
+```
+
+A plan stores each operator's *subtree* cost: its own cost plus everything below it. Each tower's height comes from its own cost, the subtree cost minus its inputs' subtree costs, as a share of the statement's total.
+
+Some details only show up in the XML. A Key Lookup is stored as a `Clustered Index Seek` whose `IndexScan` element is marked `Lookup="1"` (or `"true"`), and SSMS renames it for display, so the parser does the same. Estimated rows are per execution, so the demo multiplies them by the number of executions before comparing them with the actual rows, which are totals. In a parallel plan, actual counters are recorded per thread, and the demo adds them up.
+
+### Drawing it
+
+The towers are boxes scaled to their cost share, and they grow when a plan loads. The pipes are `TubeGeometry` along L-shaped paths, with a radius that grows with the logarithm of the row count, so 10 rows and 250,000 rows are both visible. One `Points` object animates the dots along every pipe. Labels are HTML elements placed with `CSS2DRenderer`, so they stay sharp. To keep them readable, only the selected operator and the expensive ones show their names, and row counts only appear on the selected operator's pipes.
+
+The camera keeps the whole plan in view from any angle. Each frame, it projects the corners of the plan's bounding box onto the screen and adjusts its distance until they fill about 90% of the view.
+
+### The summary
+
+"What this plan tells you" comes from a few rules over the parsed plan: the most expensive operator, scans that read many more rows than they return, key lookups and the columns they fetch, estimates that were off by three times or more, warnings, and missing index suggestions. A misestimate is reported where it starts, not again at every operator above it that inherited the same wrong row count.
+
+## Related
+
+- [How a Database Index Works: A B-Tree in 3D](/experiments/database-index-btree)
+- [SQL Server: Update or Delete Millions of Rows in Batches](/snippets/sql-batch-update-delete)
+- [Changing Large Volumes of Production Data Without an Outage](/patterns/large-data-changes-without-outage)

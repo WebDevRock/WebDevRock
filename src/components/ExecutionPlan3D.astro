@@ -1,0 +1,1199 @@
+---
+// A SQL Server execution plan in 3D: each operator is a tower whose height is its share of the
+// estimated cost, and rows flow between them along pipes sized by row count. Samples tell a story;
+// readers can also paste or open their own plan, which is parsed in the browser.
+import '../styles/tools.css';
+---
+
+<div class="plan3d" data-pagefind-ignore>
+  <div class="pv-stage" data-pv="stage">
+    <canvas
+      data-pv="canvas"
+      role="img"
+      aria-label="3D execution plan. Each operator is a tower whose height shows its share of the estimated cost, and rows flow from right to left along pipes whose thickness shows the row count. The operator list below the demo gives the same information as text."
+    ></canvas>
+    <ul class="pv-legend" aria-hidden="true">
+      <li><span style="--dot: #E8846F"></span>Scan</li>
+      <li><span style="--dot: #9ED39A"></span>Seek</li>
+      <li><span style="--dot: #E2BD73"></span>Lookup</li>
+      <li><span style="--dot: #A9C3E0"></span>Join</li>
+      <li><span style="--dot: #C9B4DC"></span>Sort or aggregate</li>
+      <li><span style="--dot: #B3AC9C"></span>Other</li>
+    </ul>
+    <div class="pv-view" aria-label="View">
+      <button type="button" data-view="in" aria-label="Zoom in">+</button>
+      <button type="button" data-view="out" aria-label="Zoom out">−</button>
+      <button type="button" data-view="reset">Reset view</button>
+    </div>
+    <p class="pv-hint">Height = share of cost · pipe width = rows · data flows right to left</p>
+  </div>
+
+  <div class="tool pv-panel">
+    <div class="pv-scenarios" role="group" aria-label="Plan">
+      <button type="button" data-sample="scan" aria-pressed="true"><span>1</span> Orders for one customer, no index</button>
+      <button type="button" data-sample="lookup" aria-pressed="false"><span>2</span> The same query, with an index</button>
+      <button type="button" data-sample="covering" aria-pressed="false"><span>3</span> With a covering index</button>
+      <button type="button" data-sample="report" aria-pressed="false"><span>4</span> Monthly sales report</button>
+      <button type="button" data-sample="convert" aria-pressed="false"><span>5</span> Find a customer by phone number</button>
+      <button type="button" data-sample="own" aria-pressed="false"><span>+</span> Your own plan</button>
+    </div>
+
+    <div class="pv-own" data-pv="own" hidden>
+      <label>
+        Paste the plan’s XML
+        <textarea data-pv="xml" spellcheck="false" placeholder="<ShowPlanXML xmlns=&quot;http://schemas.microsoft.com/sqlserver/2004/07/showplan&quot; …"></textarea>
+      </label>
+      <div class="tool-actions">
+        <button type="button" class="primary" data-action="visualise">Visualise</button>
+        <label class="pv-file">
+          <input type="file" data-pv="file" accept=".sqlplan,.xml,application/xml,text/xml" />
+          <span>Open a .sqlplan file</span>
+        </label>
+      </div>
+      <p class="pv-note">
+        In SQL Server Management Studio, right-click a plan and choose <strong>Show Execution Plan XML</strong>, or save it as a .sqlplan file.
+        The plan is read in your browser and never leaves it.
+      </p>
+    </div>
+
+    <p class="pv-story" data-pv="story"></p>
+
+    <div class="pv-meta" data-pv="meta"></div>
+    <label class="pv-statement" data-pv="statement-wrap" hidden>
+      Statement
+      <select data-pv="statement"></select>
+    </label>
+    <pre class="pv-sql"><code data-pv="sql"></code></pre>
+
+    <p class="tool-status" data-pv="status" aria-live="polite"></p>
+  </div>
+
+  <section class="pv-section" aria-labelledby="pv-findings-title">
+    <h3 id="pv-findings-title">What this plan tells you</h3>
+    <ul class="pv-findings" data-pv="findings"></ul>
+  </section>
+
+  <section class="pv-section pv-details" aria-live="polite" aria-labelledby="pv-details-title">
+    <h3 id="pv-details-title">Selected operator</h3>
+    <div data-pv="details"></div>
+  </section>
+
+  <section class="pv-section" aria-labelledby="pv-ops-title">
+    <h3 id="pv-ops-title">All operators, most expensive first</h3>
+    <div class="pv-table-wrap">
+      <table class="pv-table">
+        <thead>
+          <tr><th scope="col">Operator</th><th scope="col">Object</th><th scope="col">Cost</th><th scope="col">Rows</th></tr>
+        </thead>
+        <tbody data-pv="ops"></tbody>
+      </table>
+    </div>
+  </section>
+</div>
+
+<script>
+  import * as THREE from 'three';
+  import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+  import { CSS2DRenderer, CSS2DObject } from 'three/examples/jsm/renderers/CSS2DRenderer.js';
+  import { trackExperiment } from '../scripts/analytics';
+  import { parsePlan, rowsOut, PlanParseError, type PlanNode, type PlanStatement } from '../scripts/exec-plan/parse';
+  import { SAMPLES } from '../scripts/exec-plan/samples';
+  import {
+    category,
+    explainOperator,
+    explainWarning,
+    fmtPct,
+    fmtRows,
+    misestimate,
+    objectName,
+    estimatedTotal,
+    summarise,
+    type Category,
+  } from '../scripts/exec-plan/explain';
+
+  const COLORS: Record<Category, number> = {
+    scan: 0xe8846f,
+    seek: 0x9ed39a,
+    lookup: 0xe2bd73,
+    join: 0xa9c3e0,
+    aggregate: 0xc9b4dc,
+    other: 0xb3ac9c,
+    statement: 0xeae6dd,
+  };
+  const BG = 0x1e2528;
+  const X_STEP = 6.5;
+  const Z_STEP = 5;
+  const FOOT = 2.6;
+  const MAX_H = 11;
+  const MIN_H = 0.3;
+  const MAX_PARTICLES = 2000;
+  const DENSE = 16; // above this many operators, only label the expensive ones
+
+  const root = document.querySelector<HTMLElement>('.plan3d');
+  if (root) init(root);
+
+  function init(root: HTMLElement) {
+    const q = <T extends HTMLElement>(sel: string) => root.querySelector<T>(sel)!;
+    const stage = q<HTMLElement>('[data-pv="stage"]');
+    const canvas = q<HTMLCanvasElement>('[data-pv="canvas"]');
+    const statusEl = q<HTMLElement>('[data-pv="status"]');
+    const detailsEl = q<HTMLElement>('[data-pv="details"]');
+    const findingsEl = q<HTMLUListElement>('[data-pv="findings"]');
+    const opsEl = q<HTMLTableSectionElement>('[data-pv="ops"]');
+    const statementSelect = q<HTMLSelectElement>('[data-pv="statement"]');
+
+    // ---------- Scene ----------
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(42, 1, 0.1, 1000);
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setClearColor(BG);
+    scene.add(new THREE.AmbientLight(0xffffff, 1.6));
+    const sun = new THREE.DirectionalLight(0xffffff, 2.2);
+    sun.position.set(-6, 14, 10);
+    scene.add(sun);
+
+    const labelRenderer = new CSS2DRenderer();
+    labelRenderer.domElement.className = 'pv-labels';
+    stage.appendChild(labelRenderer.domElement);
+
+    let controls: OrbitControls | null = null;
+    if (window.matchMedia('(pointer: fine)').matches) {
+      controls = new OrbitControls(camera, canvas);
+      controls.enableZoom = false; // the + and − buttons zoom, so the wheel keeps scrolling the page
+      controls.enablePan = false;
+      controls.enableDamping = true;
+      controls.minPolarAngle = 0.35;
+      controls.maxPolarAngle = 1.45;
+    }
+
+    // ---------- Plan state ----------
+    let statements: PlanStatement[] = [];
+    let plan: PlanStatement | null = null;
+    let planGroup: THREE.Group | null = null;
+    let selected: PlanNode | null = null;
+
+    interface Tower {
+      node: PlanNode;
+      mesh: THREE.Mesh;
+      outline: THREE.LineSegments;
+      label: CSS2DObject;
+      full: string; // label with the operator's name
+      compact: string; // label with just its cost share
+      height: number;
+      grow: number;
+    }
+    interface Edge {
+      parent: PlanNode;
+      child: PlanNode;
+      path: THREE.CurvePath<THREE.Vector3>;
+      length: number;
+      count: number;
+      label: CSS2DObject;
+    }
+    let towers: Tower[] = [];
+    let edges: Edge[] = [];
+
+    const particlePositions = new Float32Array(MAX_PARTICLES * 3);
+    const particleGeo = new THREE.BufferGeometry();
+    particleGeo.setAttribute('position', new THREE.BufferAttribute(particlePositions, 3).setUsage(THREE.DynamicDrawUsage));
+    const particles = new THREE.Points(
+      particleGeo,
+      new THREE.PointsMaterial({ color: 0xf4f1ea, size: 0.32, sizeAttenuation: true, map: dotTexture(), alphaTest: 0.5 })
+    );
+    particles.frustumCulled = false;
+    scene.add(particles);
+
+    const bounds = { box: new THREE.Box3(), center: new THREE.Vector3() };
+    let zoom = 1;
+    let viewDir = new THREE.Vector3(-0.85, 1.2, 1).normalize();
+    const DEFAULT_DIR = viewDir.clone();
+
+    function clearPlan() {
+      if (!planGroup) return;
+      planGroup.traverse((o) => {
+        if (o instanceof CSS2DObject) o.element.remove();
+        if (o instanceof THREE.Mesh || o instanceof THREE.LineSegments) {
+          o.geometry.dispose();
+          const m = o.material;
+          (Array.isArray(m) ? m : [m]).forEach((mat) => mat.dispose());
+        }
+      });
+      scene.remove(planGroup);
+      planGroup = null;
+      towers = [];
+      edges = [];
+    }
+
+    function label(html: string, cls: string, onClick?: () => void) {
+      const el = document.createElement('div');
+      el.className = cls;
+      el.innerHTML = html;
+      if (onClick) {
+        el.addEventListener('click', onClick);
+        el.setAttribute('aria-hidden', 'true'); // the operator table is the accessible way to select
+      }
+      return new CSS2DObject(el);
+    }
+
+    const escapeHtml = (s: string) => s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
+
+    function buildScene(s: PlanStatement) {
+      clearPlan();
+      const group = new THREE.Group();
+      planGroup = group;
+      scene.add(group);
+
+      // Lay the tree out as SSMS does: the statement on the left, inputs to the right,
+      // each parent level with its first input, and siblings in rows behind one another
+      const pos = new Map<PlanNode, { x: number; z: number }>();
+      let slot = 0;
+      let maxDepth = 0;
+      const place = (n: PlanNode, depth: number) => {
+        maxDepth = Math.max(maxDepth, depth);
+        if (!n.children.length) {
+          pos.set(n, { x: depth * X_STEP, z: slot++ * Z_STEP });
+          return;
+        }
+        n.children.forEach((c) => place(c, depth + 1));
+        pos.set(n, { x: depth * X_STEP, z: pos.get(n.children[0])!.z });
+      };
+      place(s.root, 0);
+
+      const all = [s.root, ...s.nodes];
+
+      for (const n of all) {
+        const p = pos.get(n)!;
+        const h = n.isStatement ? MIN_H : MIN_H + MAX_H * n.costShare;
+        const mat = new THREE.MeshLambertMaterial({ color: COLORS[category(n)], emissive: 0x000000 });
+        const mesh = new THREE.Mesh(new THREE.BoxGeometry(FOOT, 1, FOOT), mat);
+        mesh.position.set(p.x, 0, p.z);
+        mesh.userData.node = n;
+        const outline = new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(FOOT + 0.25, 1, FOOT + 0.25)), new THREE.LineBasicMaterial({ color: 0xffffff }));
+        outline.visible = false;
+        mesh.add(outline);
+        group.add(mesh);
+
+        const warn = n.warnings.length || (misestimate(n) ?? 0) >= 3 ? ' <b class="pv-warn" title="Has a warning">!</b>' : '';
+        const sub = n.isStatement ? 'results' : `${n.object ? `${escapeHtml(n.object.table)} · ` : ''}${fmtPct(n.costShare)}`;
+        const full = `<strong>${escapeHtml(n.name)}${warn}</strong><span>${sub}</span>`;
+        const compact = `<span>${n.isStatement ? escapeHtml(n.name) : fmtPct(n.costShare)}${warn}</span>`;
+        const lbl = label(compact, 'pv-label', () => select(n, 'label'));
+        lbl.position.set(p.x, h + 0.7, p.z);
+        group.add(lbl);
+        towers.push({ node: n, mesh, outline, label: lbl, full, compact, height: h, grow: 0 });
+      }
+
+      // Pipes from each input to its parent, with rows flowing along them
+      const y = 0.35;
+      for (const parent of all) {
+        const pp = pos.get(parent)!;
+        for (const child of parent.children) {
+          const cp = pos.get(child)!;
+          const rows = rowsOut(child);
+          const xm = pp.x + X_STEP / 2;
+          const pts = [new THREE.Vector3(cp.x - FOOT / 2, y, cp.z), new THREE.Vector3(xm, y, cp.z), new THREE.Vector3(xm, y, pp.z), new THREE.Vector3(pp.x + FOOT / 2, y, pp.z)].filter(
+            (v, i, arr) => i === 0 || v.distanceTo(arr[i - 1]) > 1e-3
+          );
+          const path = new THREE.CurvePath<THREE.Vector3>();
+          for (let i = 1; i < pts.length; i++) path.add(new THREE.LineCurve3(pts[i - 1], pts[i]));
+          const radius = Math.min(0.55, 0.07 + 0.075 * Math.log10(rows + 1));
+          const tube = new THREE.Mesh(
+            new THREE.TubeGeometry(path, 48, radius, 10, false),
+            new THREE.MeshLambertMaterial({ color: 0x8fb8b0, transparent: true, opacity: 0.4, depthWrite: false })
+          );
+          group.add(tube);
+
+          // Row counts appear on the pipes into and out of the selected operator
+          const miss = misestimate(child);
+          const text =
+            child.actualRows !== null
+              ? `${fmtRows(rows)} row${rows === 1 ? '' : 's'}${miss !== null && miss >= 3 ? ` <em>est. ${fmtRows(estimatedTotal(child))}</em>` : ''}`
+              : `≈${fmtRows(rows)} row${rows === 1 ? '' : 's'} est.`;
+          const rowLabel = label(text, `pv-rows${miss !== null && miss >= 3 ? ' pv-rows-warn' : ''}`);
+          rowLabel.position.set((cp.x - FOOT / 2 + xm) / 2, y + radius + 0.5, cp.z);
+          rowLabel.visible = false;
+          group.add(rowLabel);
+          const count = rows > 0 ? Math.min(16, Math.max(2, Math.round(2 + Math.log10(rows + 1) * 2.5))) : 0;
+          edges.push({ parent, child, path, length: path.getLength(), count, label: rowLabel });
+        }
+      }
+
+      // Ground under the plan
+      const minZ = 0;
+      const maxZ = (slot - 1) * Z_STEP;
+      const maxX = maxDepth * X_STEP;
+      const ground = new THREE.Mesh(
+        new THREE.PlaneGeometry(maxX + FOOT + 6, maxZ + FOOT + 6),
+        new THREE.MeshLambertMaterial({ color: 0x283033 })
+      );
+      ground.rotation.x = -Math.PI / 2;
+      ground.position.set(maxX / 2, -0.01, (minZ + maxZ) / 2);
+      group.add(ground);
+
+      // The box the camera keeps in view: every tower, plus room for the labels above them
+      const maxH = Math.max(...towers.map((t) => t.height));
+      bounds.box.set(new THREE.Vector3(-FOOT / 2 - 0.5, 0, minZ - FOOT / 2 - 0.5), new THREE.Vector3(maxX + FOOT / 2 + 0.5, maxH + 1.8, maxZ + FOOT / 2 + 0.5));
+      bounds.box.getCenter(bounds.center);
+      zoom = 1;
+    }
+
+    // Which labels show: names on the selected and the expensive operators, cost shares on the rest,
+    // and row counts only on the pipes into and out of the selected operator
+    function updateLabels() {
+      const dense = towers.length > DENSE;
+      for (const t of towers) {
+        const on = t.node === selected;
+        const named = on || t.node.isStatement || t.node.costShare >= 0.15;
+        t.label.element.innerHTML = named ? t.full : t.compact;
+        t.label.element.classList.toggle('pv-label-on', on);
+        t.label.element.classList.toggle('pv-label-compact', !named);
+        t.label.visible = on || !dense || t.node.costShare >= 0.02;
+      }
+      for (const e of edges) e.label.visible = e.child === selected || e.parent === selected;
+    }
+
+    // ---------- Selection ----------
+    function select(n: PlanNode, via: string) {
+      selected = n;
+      for (const t of towers) {
+        const on = t.node === n;
+        t.outline.visible = on;
+        (t.mesh.material as THREE.MeshLambertMaterial).emissive.setHex(on ? 0x333333 : 0x000000);
+      }
+      updateLabels();
+      renderDetails(n);
+      opsEl.querySelectorAll('tr').forEach((tr) => tr.classList.toggle('pv-row-on', (tr as HTMLElement).dataset.node === String(nodeKey(n))));
+      if (via !== 'auto') trackExperiment('exec-plan', `select:${via}`);
+    }
+
+    const nodeKey = (n: PlanNode) => (n.isStatement ? 'stmt' : String(n.nodeId));
+
+    function renderDetails(n: PlanNode) {
+      const rows: [string, string][] = [];
+      if (n.isStatement) {
+        rows.push(['Estimated cost of the whole query', plan ? plan.totalCost.toFixed(4) : '']);
+        rows.push(['Rows returned', `${fmtRows(rowsOut(n.children[0]))}${n.children[0].actualRows === null ? ' (estimated)' : ''}`]);
+      } else {
+        rows.push(['Share of estimated cost', `${fmtPct(n.costShare)} (operator cost ${n.cost.toFixed(4)})`]);
+        rows.push([
+          'Estimated rows',
+          n.estExecutions > 1.0001
+            ? `${fmtRows(n.estRows)} per execution × ${fmtRows(n.estExecutions)} executions = ${fmtRows(estimatedTotal(n))}`
+            : fmtRows(n.estRows),
+        ]);
+        if (n.actualRows !== null) {
+          const miss = misestimate(n);
+          rows.push(['Actual rows', `${fmtRows(n.actualRows)}${miss !== null && miss >= 3 ? ` (about ${Math.round(miss)} times ${n.actualRows > estimatedTotal(n) ? 'more' : 'fewer'} than estimated)` : ''}`]);
+        }
+        if (n.actualExecutions !== null && n.actualExecutions !== 1) rows.push(['Executions', fmtRows(n.actualExecutions)]);
+        const read = n.actualRowsRead ?? n.estRowsRead;
+        if (read !== null && read !== undefined) rows.push([n.actualRowsRead !== null ? 'Rows read' : 'Estimated rows read', fmtRows(read)]);
+        if (n.object) rows.push(['Object', `${n.object.schema}.${n.object.table}${n.object.index ? `, index ${n.object.index}` : ''}`]);
+        if (n.seek) rows.push(['Seek', n.seek]);
+        if (n.predicate) rows.push(['Condition checked on every row', n.predicate]);
+        if (n.outputColumns.length) rows.push(['Columns passed on', n.outputColumns.join(', ')]);
+      }
+
+      detailsEl.replaceChildren();
+      const head = document.createElement('p');
+      head.className = 'pv-details-head';
+      const chip = document.createElement('span');
+      chip.className = `pv-chip pv-chip-${category(n)}`;
+      chip.textContent = n.name;
+      head.append(chip);
+      if (!n.isStatement && n.object) head.append(` on ${objectName(n)}`);
+      const explain = document.createElement('p');
+      explain.textContent = explainOperator(n);
+      const dl = document.createElement('dl');
+      dl.className = 'pv-dl';
+      for (const [k, v] of rows) {
+        const dt = document.createElement('dt');
+        dt.textContent = k;
+        const dd = document.createElement('dd');
+        dd.textContent = v;
+        dl.append(dt, dd);
+      }
+      detailsEl.append(head, explain, dl);
+      for (const w of n.warnings) {
+        const p = document.createElement('p');
+        p.className = 'pv-callout';
+        p.textContent = `Warning: ${explainWarning(w)}${w.detail ? ` (${w.detail})` : ''}`;
+        detailsEl.append(p);
+      }
+    }
+
+    function renderFindings(s: PlanStatement) {
+      findingsEl.replaceChildren(
+        ...summarise(s).map((f) => {
+          const li = document.createElement('li');
+          li.className = `pv-finding pv-finding-${f.tone}`;
+          const p = document.createElement('p');
+          p.textContent = f.text;
+          li.append(p);
+          if (f.sql) {
+            const pre = document.createElement('pre');
+            pre.className = 'pv-sql pv-sql-small';
+            pre.textContent = f.sql;
+            li.append(pre);
+          }
+          if (f.node) {
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'pv-link';
+            btn.textContent = `Show the ${f.node.name}`;
+            const node = f.node;
+            btn.addEventListener('click', () => select(node, 'finding'));
+            li.append(btn);
+          }
+          return li;
+        })
+      );
+    }
+
+    function renderOps(s: PlanStatement) {
+      const sorted = [...s.nodes].sort((a, b) => b.cost - a.cost);
+      opsEl.replaceChildren(
+        ...[...sorted, s.root].map((n) => {
+          const tr = document.createElement('tr');
+          tr.dataset.node = String(nodeKey(n));
+          const name = document.createElement('td');
+          const btn = document.createElement('button');
+          btn.type = 'button';
+          btn.className = 'pv-op';
+          btn.innerHTML = `<span class="pv-dot" style="--dot:#${COLORS[category(n)].toString(16).padStart(6, '0')}"></span>`;
+          btn.append(n.name + (n.warnings.length ? ' ⚠' : ''));
+          btn.addEventListener('click', () => select(n, 'table'));
+          name.append(btn);
+          const obj = document.createElement('td');
+          obj.textContent = objectName(n);
+          const cost = document.createElement('td');
+          cost.textContent = n.isStatement ? '' : fmtPct(n.costShare);
+          const rows = document.createElement('td');
+          const out = n.isStatement ? rowsOut(n.children[0]) : rowsOut(n);
+          rows.textContent = `${fmtRows(out)}${(n.isStatement ? n.children[0] : n).actualRows === null ? ' est.' : ''}`;
+          tr.append(name, obj, cost, rows);
+          return tr;
+        })
+      );
+    }
+
+    function renderMeta(s: PlanStatement) {
+      const meta = q<HTMLElement>('[data-pv="meta"]');
+      const badges = [
+        s.isActual ? 'Actual plan' : 'Estimated plan',
+        `Estimated cost ${s.totalCost < 0.01 ? s.totalCost.toFixed(4) : s.totalCost.toFixed(2)}`,
+        `${s.nodes.length} operator${s.nodes.length === 1 ? '' : 's'}`,
+      ];
+      if (s.degreeOfParallelism > 1) badges.push(`Parallel, ${s.degreeOfParallelism} threads`);
+      meta.replaceChildren(
+        ...badges.map((b) => {
+          const span = document.createElement('span');
+          span.className = 'pv-badge';
+          span.textContent = b;
+          return span;
+        })
+      );
+      q('[data-pv="sql"]').textContent = s.text || '(No statement text in the plan)';
+    }
+
+    function showStatement(s: PlanStatement) {
+      plan = s;
+      buildScene(s);
+      renderMeta(s);
+      renderFindings(s);
+      renderOps(s);
+      const top = [...s.nodes].sort((a, b) => b.cost - a.cost)[0] ?? s.root;
+      select(top, 'auto');
+    }
+
+    function load(xml: string, source: string) {
+      try {
+        statements = parsePlan(xml);
+      } catch (err) {
+        statusEl.textContent = err instanceof PlanParseError ? err.message : 'The plan couldn’t be read.';
+        statusEl.className = 'tool-status error';
+        if (!(err instanceof PlanParseError)) console.error(err);
+        return false;
+      }
+      statusEl.textContent = '';
+      statusEl.className = 'tool-status';
+      const tooBig = statements.find((s) => s.nodes.length > 400);
+      if (tooBig) {
+        statusEl.textContent = 'This plan has more than 400 operators, which is more than the demo can draw clearly. Try a smaller query.';
+        statusEl.className = 'tool-status warn';
+        return false;
+      }
+      const wrap = q<HTMLElement>('[data-pv="statement-wrap"]');
+      wrap.hidden = statements.length < 2;
+      statementSelect.replaceChildren(
+        ...statements.map((s, i) => {
+          const o = document.createElement('option');
+          o.value = String(i);
+          o.textContent = `${i + 1}. ${s.text.replace(/\s+/g, ' ').slice(0, 70) || s.type}${s.text.length > 70 ? '…' : ''}`;
+          return o;
+        })
+      );
+      // Start with the most expensive statement in a batch
+      const first = statements.reduce((best, s, i) => (s.totalCost > statements[best].totalCost ? i : best), 0);
+      statementSelect.value = String(first);
+      showStatement(statements[first]);
+      trackExperiment('exec-plan', `load:${source}`);
+      return true;
+    }
+
+    statementSelect.addEventListener('change', () => showStatement(statements[Number(statementSelect.value)]));
+
+    // ---------- Samples and your own plan ----------
+    const storyEl = q<HTMLElement>('[data-pv="story"]');
+    const ownEl = q<HTMLElement>('[data-pv="own"]');
+
+    function chooseSample(id: string) {
+      root.querySelectorAll<HTMLButtonElement>('[data-sample]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.sample === id)));
+      ownEl.hidden = id !== 'own';
+      if (id === 'own') {
+        storyEl.textContent = 'Paste an estimated or actual plan from SQL Server, or open a .sqlplan file.';
+        return;
+      }
+      const sample = SAMPLES.find((s) => s.id === id)!;
+      storyEl.textContent = sample.story;
+      load(sample.xml, `sample:${id}`);
+    }
+
+    root.querySelectorAll<HTMLButtonElement>('[data-sample]').forEach((b) => b.addEventListener('click', () => chooseSample(b.dataset.sample!)));
+
+    q('[data-action="visualise"]').addEventListener('click', () => {
+      const xml = q<HTMLTextAreaElement>('[data-pv="xml"]').value;
+      if (!xml.trim()) {
+        statusEl.textContent = 'Paste a plan’s XML first.';
+        statusEl.className = 'tool-status warn';
+        return;
+      }
+      if (load(xml, 'paste')) storyEl.textContent = 'Your plan. Select any tower, or an operator in the list, for details.';
+    });
+
+    q<HTMLInputElement>('[data-pv="file"]').addEventListener('change', (e) => {
+      const file = (e.target as HTMLInputElement).files?.[0];
+      if (!file) return;
+      if (file.size > 20 * 1024 * 1024) {
+        statusEl.textContent = 'That file is over 20 MB, which is too large to draw.';
+        statusEl.className = 'tool-status warn';
+        return;
+      }
+      const reader = new FileReader();
+      reader.onload = () => {
+        const text = String(reader.result ?? '');
+        q<HTMLTextAreaElement>('[data-pv="xml"]').value = text.length < 200000 ? text : '';
+        if (load(text, 'file')) storyEl.textContent = `${file.name}. Select any tower, or an operator in the list, for details.`;
+      };
+      reader.readAsText(file);
+    });
+
+    // ---------- View controls ----------
+    root.querySelectorAll<HTMLButtonElement>('[data-view]').forEach((b) =>
+      b.addEventListener('click', () => {
+        const v = b.dataset.view;
+        if (v === 'in') zoom = Math.max(0.35, zoom / 1.3);
+        else if (v === 'out') zoom = Math.min(2.5, zoom * 1.3);
+        else {
+          zoom = 1;
+          viewDir = DEFAULT_DIR.clone();
+          camera.position.copy(bounds.center).addScaledVector(viewDir, 10);
+        }
+      })
+    );
+
+    // Click a tower to select it (ignoring drags that rotate the view)
+    const raycaster = new THREE.Raycaster();
+    const pointer = new THREE.Vector2();
+    let downAt: { x: number; y: number } | null = null;
+    canvas.addEventListener('pointerdown', (e) => (downAt = { x: e.clientX, y: e.clientY }));
+    canvas.addEventListener('pointerup', (e) => {
+      if (!downAt || Math.hypot(e.clientX - downAt.x, e.clientY - downAt.y) > 6) return;
+      const rect = canvas.getBoundingClientRect();
+      pointer.set(((e.clientX - rect.left) / rect.width) * 2 - 1, -((e.clientY - rect.top) / rect.height) * 2 + 1);
+      raycaster.setFromCamera(pointer, camera);
+      const hit = raycaster.intersectObjects(towers.map((t) => t.mesh), false)[0];
+      if (hit) select(hit.object.userData.node as PlanNode, 'tower');
+    });
+    canvas.addEventListener('pointermove', (e) => {
+      if (e.buttons) return;
+      const rect = canvas.getBoundingClientRect();
+      pointer.set(((e.clientX - rect.left) / rect.width) * 2 - 1, -((e.clientY - rect.top) / rect.height) * 2 + 1);
+      raycaster.setFromCamera(pointer, camera);
+      canvas.style.cursor = raycaster.intersectObjects(towers.map((t) => t.mesh), false).length ? 'pointer' : '';
+    });
+
+    // ---------- Render loop ----------
+    function fit() {
+      const w = stage.clientWidth;
+      const h = stage.clientHeight;
+      if (!w || !h) return;
+      camera.aspect = w / h;
+      camera.updateProjectionMatrix();
+      renderer.setSize(w, h, false);
+      labelRenderer.setSize(w, h);
+    }
+    new ResizeObserver(fit).observe(stage);
+    fit();
+
+    let last = performance.now();
+    let clock = 0;
+    const tmp = new THREE.Vector3();
+    let fitDist = 40;
+
+    // The camera distance at which the plan's bounding box fills about 90% of the view from the current angle
+    const corners = Array.from({ length: 8 }, () => new THREE.Vector3());
+    function fitDistance() {
+      const { min, max } = bounds.box;
+      corners.forEach((c, i) => c.set(i & 1 ? max.x : min.x, i & 2 ? max.y : min.y, i & 4 ? max.z : min.z));
+      let d = 40;
+      for (let pass = 0; pass < 4; pass++) {
+        camera.position.copy(bounds.center).addScaledVector(viewDir, d);
+        camera.lookAt(bounds.center);
+        camera.updateMatrixWorld();
+        let m = 0;
+        for (const c of corners) {
+          tmp.copy(c).project(camera);
+          m = Math.max(m, Math.abs(tmp.x), Math.abs(tmp.y));
+        }
+        if (!Number.isFinite(m) || m <= 0) break;
+        d *= m / 0.9;
+      }
+      return d;
+    }
+
+    function frame(t: number) {
+      const dt = Math.min(0.1, (t - last) / 1000);
+      last = t;
+      clock += dt;
+
+      for (const tw of towers) {
+        if (tw.grow < 1) tw.grow = Math.min(1, tw.grow + dt * 1.8);
+        const eased = 1 - (1 - tw.grow) ** 3;
+        const h = Math.max(0.01, tw.height * eased);
+        tw.mesh.scale.y = h;
+        tw.mesh.position.y = h / 2;
+        tw.outline.scale.y = 1;
+      }
+
+      let p = 0;
+      for (const e of edges) {
+        for (let i = 0; i < e.count && p < MAX_PARTICLES; i++) {
+          const u = (((clock * 2.4) / e.length + i / e.count) % 1 + 1) % 1;
+          e.path.getPointAt(u, tmp);
+          particlePositions[p * 3] = tmp.x;
+          particlePositions[p * 3 + 1] = tmp.y;
+          particlePositions[p * 3 + 2] = tmp.z;
+          p++;
+        }
+      }
+      particleGeo.setDrawRange(0, p);
+      particleGeo.attributes.position.needsUpdate = true;
+
+      // Keep the whole plan in view, from whatever angle the reader has rotated to
+      if (controls) {
+        const d = camera.position.clone().sub(controls.target);
+        if (d.lengthSq() > 1e-6) viewDir = d.normalize();
+      }
+      fitDist += (fitDistance() - fitDist) * (1 - Math.exp(-dt * 6));
+      camera.position.copy(bounds.center).addScaledVector(viewDir, fitDist * zoom);
+      if (controls) {
+        controls.target.copy(bounds.center);
+        controls.update();
+      }
+      camera.lookAt(bounds.center);
+      renderer.render(scene, camera);
+      labelRenderer.render(scene, camera);
+    }
+
+    new IntersectionObserver(([entry]) => {
+      if (entry.isIntersecting) {
+        last = performance.now();
+        renderer.setAnimationLoop(frame);
+      } else {
+        renderer.setAnimationLoop(null);
+      }
+    }).observe(stage);
+
+    chooseSample('scan');
+  }
+
+  function dotTexture() {
+    const c = document.createElement('canvas');
+    c.width = c.height = 64;
+    const g = c.getContext('2d')!;
+    g.fillStyle = '#fff';
+    g.beginPath();
+    g.arc(32, 32, 30, 0, Math.PI * 2);
+    g.fill();
+    const tex = new THREE.CanvasTexture(c);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    return tex;
+  }
+</script>
+
+<style is:global>
+  .plan3d {
+    margin: 2rem 0;
+  }
+
+  .pv-stage {
+    position: relative;
+    aspect-ratio: 16 / 10;
+    overflow: hidden;
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-lg);
+    background: var(--surface-inverse);
+  }
+
+  .pv-stage canvas {
+    display: block;
+    width: 100%;
+    height: 100%;
+  }
+
+  .pv-labels {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+  }
+
+  .pv-label {
+    display: grid;
+    padding: 3px 8px;
+    border: 1px solid rgba(234, 230, 221, 0.15);
+    border-radius: var(--radius-sm);
+    background: rgba(30, 37, 40, 0.85);
+    color: var(--syn-text);
+    font-family: var(--font-sans);
+    font-size: 11.5px;
+    line-height: 1.3;
+    text-align: center;
+    white-space: nowrap;
+    cursor: pointer;
+    pointer-events: auto;
+  }
+
+  /* .plan3d prefix outranks the article's `.content strong` colour */
+  .plan3d .pv-label strong {
+    color: inherit;
+    font-weight: 600;
+  }
+
+  .pv-label span {
+    color: var(--syn-muted);
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+  }
+
+  .pv-label-on {
+    z-index: 2;
+    border-color: #f4f1ea;
+    background: rgba(30, 37, 40, 0.97);
+  }
+
+  .pv-label-compact {
+    padding: 1px 6px;
+  }
+
+  .pv-warn {
+    display: inline-grid;
+    place-items: center;
+    width: 14px;
+    height: 14px;
+    margin-left: 4px;
+    border-radius: 50%;
+    background: #e2bd73;
+    color: #1e2528;
+    font-size: 10px;
+    vertical-align: 1px;
+  }
+
+  .pv-rows {
+    padding: 1px 6px;
+    border-radius: var(--radius-xs);
+    background: rgba(30, 37, 40, 0.75);
+    color: var(--syn-muted);
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    white-space: nowrap;
+  }
+
+  .pv-rows em {
+    color: #e2bd73;
+    font-style: normal;
+  }
+
+  .pv-rows-warn {
+    color: #f4f1ea;
+  }
+
+  .pv-legend {
+    position: absolute;
+    top: 10px;
+    left: 12px;
+    z-index: 1;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 12px;
+    max-width: calc(100% - 24px);
+    margin: 0;
+    padding: 5px 9px;
+    border-radius: var(--radius-sm);
+    background: rgba(30, 37, 40, 0.85);
+    list-style: none;
+    color: var(--syn-muted);
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    pointer-events: none;
+  }
+
+  /* .plan3d prefix outranks the article's `.content li + li` spacing */
+  .plan3d .pv-legend li {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    margin: 0;
+  }
+
+  .pv-legend span,
+  .pv-dot {
+    display: inline-block;
+    flex: none;
+    width: 10px;
+    height: 10px;
+    border-radius: 2px;
+    background: var(--dot);
+  }
+
+  .pv-view {
+    position: absolute;
+    right: 10px;
+    bottom: 10px;
+    z-index: 1;
+    display: flex;
+    gap: 6px;
+  }
+
+  .pv-view button {
+    min-width: 32px;
+    min-height: 32px;
+    padding: 2px 10px;
+    border: 1px solid rgba(234, 230, 221, 0.25);
+    border-radius: var(--radius-sm);
+    background: rgba(30, 37, 40, 0.85);
+    color: var(--syn-text);
+    font-family: var(--font-sans);
+    font-size: 13px;
+    cursor: pointer;
+  }
+
+  .pv-view button:hover {
+    border-color: var(--syn-text);
+  }
+
+  .pv-hint {
+    position: absolute;
+    left: 12px;
+    bottom: 10px;
+    z-index: 1;
+    max-width: calc(100% - 200px);
+    margin: 0;
+    color: var(--syn-comment);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    pointer-events: none;
+  }
+
+  .pv-panel {
+    margin-top: 12px;
+  }
+
+  .pv-scenarios {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 8px;
+  }
+
+  .plan3d .tool .pv-scenarios button {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    text-align: left;
+    font-weight: 500;
+  }
+
+  .pv-scenarios button span {
+    display: inline-grid;
+    flex: none;
+    place-items: center;
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    background: var(--surface-sunken);
+    font-family: var(--font-mono);
+    font-size: 12px;
+  }
+
+  .plan3d .tool .pv-scenarios button[aria-pressed='true'] {
+    border-color: var(--accent);
+    background: var(--accent-tint);
+  }
+
+  .pv-scenarios button[aria-pressed='true'] span {
+    background: var(--accent);
+    color: var(--accent-on);
+  }
+
+  .pv-own {
+    display: grid;
+    gap: 10px;
+  }
+
+  .plan3d .pv-own[hidden] {
+    display: none;
+  }
+
+  .pv-own textarea {
+    min-height: 8rem;
+    font-size: 12.5px;
+  }
+
+  .plan3d .tool label.pv-file {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    min-height: 40px;
+    padding: 8px 14px;
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-md);
+    background: var(--surface-raised);
+    font-size: 14.5px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+
+  .pv-file input {
+    position: absolute;
+    inset: 0;
+    opacity: 0;
+    cursor: pointer;
+  }
+
+  .pv-file:focus-within {
+    box-shadow: var(--focus-ring);
+  }
+
+  .pv-note,
+  .pv-story {
+    margin: 0;
+    color: var(--text-body);
+    font-size: var(--fs-small);
+  }
+
+  .pv-story {
+    color: var(--text-strong);
+    font-size: 15px;
+  }
+
+  .pv-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .pv-badge {
+    padding: 2px 8px;
+    border-radius: var(--radius-pill);
+    background: var(--surface-sunken);
+    color: var(--text-body);
+    font-family: var(--font-mono);
+    font-size: 12px;
+  }
+
+  .plan3d .tool label.pv-statement {
+    font-size: 13px;
+  }
+
+  .plan3d .pv-sql {
+    max-height: 14rem;
+    margin: 0;
+    padding: 12px 14px;
+    overflow: auto;
+    border-radius: var(--radius-md);
+    background: var(--surface-code);
+    color: var(--syn-text);
+    font-family: var(--font-mono);
+    font-size: 13px;
+    line-height: 1.55;
+    white-space: pre-wrap;
+  }
+
+  .plan3d .pv-sql-small {
+    margin-top: 8px;
+    font-size: 12.5px;
+  }
+
+  .pv-section {
+    margin-top: 12px;
+    padding: 16px 20px;
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-lg);
+    background: var(--surface-card);
+  }
+
+  .plan3d .pv-section h3 {
+    margin: 0 0 10px;
+    font-size: 16px;
+  }
+
+  .plan3d .pv-findings {
+    display: grid;
+    gap: 8px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .plan3d .pv-finding {
+    margin: 0;
+    padding: 10px 12px;
+    border-left: 3px solid var(--slate-500);
+    border-radius: var(--radius-sm);
+    background: var(--surface-raised);
+  }
+
+  .plan3d .pv-finding p {
+    margin: 0;
+    font-size: var(--fs-small);
+  }
+
+  .pv-finding-warn {
+    border-left-color: var(--ochre-500) !important;
+  }
+
+  .pv-finding-good {
+    border-left-color: var(--green-500) !important;
+  }
+
+  .plan3d .pv-link {
+    margin-top: 6px;
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--text-link);
+    font: inherit;
+    font-size: 13.5px;
+    text-decoration: underline;
+    cursor: pointer;
+  }
+
+  .plan3d .pv-details-head {
+    margin: 0 0 8px;
+  }
+
+  .pv-chip {
+    display: inline-block;
+    padding: 2px 10px;
+    border-radius: var(--radius-pill);
+    color: #1e2528;
+    font-weight: 600;
+  }
+
+  .pv-chip-scan { background: #f2c2b6; }
+  .pv-chip-seek { background: #cfe9cd; }
+  .pv-chip-lookup { background: #f1deb3; }
+  .pv-chip-join { background: #d6e2f0; }
+  .pv-chip-aggregate { background: #e5dbee; }
+  .pv-chip-other,
+  .pv-chip-statement { background: var(--surface-sunken); }
+
+  .plan3d .pv-details p {
+    font-size: var(--fs-small);
+  }
+
+  .plan3d .pv-dl {
+    display: grid;
+    grid-template-columns: minmax(130px, auto) 1fr;
+    gap: 4px 14px;
+    margin: 10px 0 0;
+    font-size: 14px;
+  }
+
+  .plan3d .pv-dl dt {
+    color: var(--text-muted);
+  }
+
+  .plan3d .pv-dl dd {
+    margin: 0;
+    overflow-wrap: anywhere;
+    font-family: var(--font-mono);
+    font-size: 13px;
+  }
+
+  .plan3d .pv-callout {
+    margin: 10px 0 0;
+    padding: 8px 10px;
+    border-radius: var(--radius-md);
+    background: var(--warning-bg);
+    color: var(--warning-fg);
+  }
+
+  .pv-table-wrap {
+    overflow-x: auto;
+  }
+
+  .plan3d .pv-table {
+    width: 100%;
+    margin: 0;
+    border-collapse: collapse;
+    font-size: 13.5px;
+  }
+
+  .plan3d .pv-table th,
+  .plan3d .pv-table td {
+    padding: 5px 8px;
+    border-bottom: 1px solid var(--border-subtle);
+    text-align: left;
+    vertical-align: middle;
+  }
+
+  .plan3d .pv-table td:nth-child(3),
+  .plan3d .pv-table td:nth-child(4) {
+    font-family: var(--font-mono);
+    white-space: nowrap;
+  }
+
+  .plan3d .pv-op {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 2px 0;
+    border: 0;
+    background: none;
+    color: var(--text-link);
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .plan3d .pv-row-on td {
+    background: var(--accent-tint);
+  }
+
+  @media (max-width: 640px) {
+    .pv-stage {
+      aspect-ratio: auto;
+      height: 380px;
+    }
+
+    .pv-hint {
+      display: none;
+    }
+
+    .plan3d .pv-dl {
+      grid-template-columns: 1fr;
+    }
+  }
+</style>
