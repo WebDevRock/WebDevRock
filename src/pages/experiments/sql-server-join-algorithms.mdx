@@ -1,0 +1,123 @@
+---
+layout: ../../layouts/ContentLayout.astro
+title: "How SQL Server Joins Tables: Nested Loops, Hash and Merge, Side by Side"
+description: "Watch SQL Server's three join algorithms join the same rows at the same time, then see which one does the least work at real table sizes, and why."
+tags: [threejs, visualization, sql-server, performance]
+updated: "2026-11-01"
+---
+
+import JoinAlgorithms3D from '../../components/JoinAlgorithms3D.astro';
+
+## Overview
+
+When a query joins two tables, SQL Server has three main ways to do it: **nested loops**, **hash match** and **merge join**. You choose the *logical* join (`INNER JOIN`, `LEFT JOIN` and so on). The query optimiser chooses the *physical* algorithm. They all return the same rows, but at very different costs depending on how many rows there are, what's indexed, and what order the rows arrive in.
+
+This experiment uses the same `Shop` database as the [execution plan viewer](/experiments/sql-execution-plan-3d): orders joined to the customers who placed them.
+
+```sql
+SELECT o.OrderId, o.Total, c.City
+FROM dbo.Orders AS o
+JOIN dbo.Customers AS c ON c.CustomerId = o.CustomerId;
+```
+
+The 3D view runs all three algorithms at once on 8 orders and 6 customers, so you can follow every step. The panel underneath scales the same choices up to real table sizes.
+
+## Demo
+
+<JoinAlgorithms3D />
+
+Amber blocks are orders, labelled with the customer each belongs to: **→3** is an order for customer 3. Teal blocks are customers. Every time an algorithm compares two rows they flash, green if they match, and each joined row turns green and moves to the right. The status under each lane counts steps and comparisons.
+
+## The three algorithms
+
+### Nested loops: one lookup per row
+
+For each order, find its customer. With an index on `Customers.CustomerId`, which is normally the primary key, that's a single **index seek** per order. In the demo, each order takes one comparison.
+
+Untick **Index on Customers.CustomerId** and nothing tells SQL Server where a customer is, so every order checks every customer: 48 comparisons instead of 8. Microsoft calls this a *naive* nested loops join. On a real table it means reading the whole customer table once for every order.
+
+Nested loops shines when one side is small and the other is indexed on the join column. Microsoft's documentation gives the clearest case as an outer input of fewer than 10 rows joined to a large, indexed table. It's the usual choice for a page showing one customer's orders. It gets expensive as the number of outer rows grows, because each lookup costs a few page reads, and they add up.
+
+### Hash match: build, then probe
+
+Hash match reads the **smaller** input first, the **build** input, and puts every row into a hash table in memory, sorted into buckets by a hash of the join column. Then it reads the other input, the **probe** input. Each row is hashed and compared only with the rows in its own bucket.
+
+In the demo, the 6 customers go into 3 buckets, by `CustomerId % 3`, and each order checks only 2 customers instead of 6. A real hash table has many more buckets, so each probe usually checks very few rows.
+
+Hash match doesn't need an index or any particular order, so it handles large, unsorted inputs well. That's why it was chosen for the monthly report in the [execution plan viewer](/experiments/sql-execution-plan-3d). The cost is **memory**. The hash table has to fit in the query's memory grant, and if the build input turns out bigger than estimated, part of it is written to tempdb. That's the "spill" warning from the report example.
+
+### Merge join: two sorted lists, walked together
+
+If both inputs are sorted on the join column, a merge join walks through them side by side, like merging two sorted piles of paper. It compares the current order with the current customer, outputs a match, and moves on whichever side is behind. Every row is read once, and no memory is needed for a hash table.
+
+The catch is the sorting. Customers come sorted for free from their clustered primary key. Orders read straight from their table come in `OrderId` order, so the merge lane has to **sort** them first. That's most of its 54 steps. Tick **Orders already in CustomerId order**, as if there were an index on `Orders(CustomerId)`, and the sort disappears, leaving a merge join that finishes in 21 steps.
+
+## At real sizes
+
+The panel under the demo estimates each algorithm's work for real table sizes:
+
+- **One customer's orders:** 12 orders. Nested loops needs about 37 page reads. Reading both tables in full for hash or merge would take 668.
+- **Monthly sales report:** 31,204 orders. One index seek per order would add up to about 94,000 page reads. Hash match reads each table once, about 1,300 pages, and needs under 1 MB of memory.
+- **Report with an index on Orders(CustomerId):** both inputs arrive sorted, so merge join reads the same pages as hash and needs no sort and no memory for a hash table. It edges ahead.
+- **Joining to an imported table:** a customer list loaded from a CSV file with no indexes. Nested loops would read all 20,000 customers for every order, and merge would have to sort them first, so hash match wins easily.
+
+Move the sliders to find the crossover points. With 20,000 indexed customers, nested loops stays cheapest in this model up to about 228 orders.
+
+### What the numbers are, and aren't
+
+The estimates come from a deliberately simple model, so that you can see why each algorithm wins. They are **not** SQL Server's own cost calculations. The assumptions:
+
+- 50 order rows or 30 customer rows per 8 KB page, and about 500 pointers per index page, so an index seek reads 3 pages for 20,000 customers.
+- **Pages read** counts every page touched, the way `SET STATISTICS IO` reports logical reads. Nested loops reads the orders once, plus one index seek per order. Hash and merge read both tables once.
+- **Rows compared**: nested loops compares each order against its index path. Hash and merge touch each row once. Sorting *n* rows takes about *n* × log₂(*n*) comparisons.
+- **Memory**: about 40 bytes per row in the hash table or the sort.
+- **Work** combines the three: one page read, a thousand comparisons, or 100 KB of memory each count as one unit.
+
+The real optimiser weighs CPU and I/O with its own cost model, and works from statistics, which are estimates. It also has options this model leaves out, below. So the crossover points in the model are illustrations. The real ones depend on your data and hardware, and are often lower: Microsoft's own example of where nested loops clearly wins is an outer input of fewer than 10 rows.
+
+## What the model leaves out
+
+- **Spills.** If a hash table or sort doesn't fit in its memory grant, SQL Server writes part of it to tempdb and reads it back, which is much slower. A hash join that spills switches step by step to more disk-based methods (Microsoft calls them grace and recursive hash joins). If it got the sizes of its two inputs the wrong way round, it can swap their roles, known as role reversal.
+- **Many-to-many merge joins.** When both inputs have duplicate join values, a merge join stores rows in a worktable so that it can go back over the duplicates. Here each order has exactly one customer, so that never happens.
+- **Adaptive joins.** From SQL Server 2017, in batch mode, which usually means a columnstore index is involved, a plan can include an *adaptive join*. It reads the first input, then decides at run time between hash match and nested loops, based on how many rows actually arrived.
+- **Parallelism and other tricks**, such as nested loops sorting its outer rows to read a large inner table more efficiently. The plan XML shows this as the `Optimized` attribute on the Nested Loops operator.
+
+## In your own plans
+
+Each algorithm has its own operator in an execution plan: **Nested Loops**, **Hash Match** and **Merge Join**. If a slow query shows a surprising choice, the cause is usually one of these:
+
+- **The row estimate is wrong.** Nested loops chosen for what turns out to be 50,000 rows, or a hash join spilling because the build input was underestimated. Up-to-date statistics fix many of these. The [execution plan viewer](/experiments/sql-execution-plan-3d) shows how to compare estimated and actual rows.
+- **An index is missing.** Without an index on the join column, nested loops isn't a sensible option and merge needs a sort. An index on the foreign key column, such as `Orders(CustomerId)`, gives the optimiser better choices.
+- **Too many lookups.** Nested loops into a nonclustered index, followed by a key lookup per row. A covering index removes the lookups, as in the [B-tree experiment](/experiments/database-index-btree).
+
+You can force an algorithm with a join hint, such as `INNER HASH JOIN`, or `OPTION (LOOP JOIN)`, but it's rarely a good fix. The hint stays in place when the data changes, while the optimiser could have adapted. Fix the estimate or the index first.
+
+## How the demo is built
+
+Each algorithm is a JavaScript generator that yields one event at a time: *move this block*, *compare these two rows*, *output a match*, or *a new phase starts*.
+
+```javascript
+// Simplified from src/scripts/joins/model.ts
+function* hashJoin(customers) {
+  yield { t: 'phase', text: 'Build: put each customer in a bucket by its CustomerId' };
+  for (const [j, id] of customers.entries()) {
+    yield { t: 'move', id: `c${j}`, to: { area: 'bucket', bucket: id % 3, level: level[id % 3]++ } };
+  }
+  yield { t: 'phase', text: 'Probe: each order checks only its own bucket' };
+  for (const [k, wanted] of orders.entries()) {
+    yield { t: 'move', id: `o${k}`, to: { area: 'bucket-front', bucket: wanted % 3 } };
+    for (const j of bucket[wanted % 3]) {
+      yield { t: 'compare', a: `o${k}`, b: `c${j}`, match: customers[j] === wanted };
+    }
+    yield { t: 'output', order: `o${k}`, customer: `c${found}` };
+  }
+}
+```
+
+The animation asks all three generators for their next event on each tick, so the lanes move in lockstep and each lane's step count is directly comparable. Blocks glide to their new positions between ticks. The same generators are tested on their own, outside the page, for every combination of settings, to check that all three produce the same eight joined rows.
+
+## Related
+
+- [How to Read a SQL Server Execution Plan, in 3D](/experiments/sql-execution-plan-3d)
+- [How a Database Index Works: A B-Tree in 3D](/experiments/database-index-btree)
+- [SQL Server: Bulk Update with JOIN](/snippets/sql-bulk-update-join)

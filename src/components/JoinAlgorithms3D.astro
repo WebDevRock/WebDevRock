@@ -1,0 +1,871 @@
+---
+// The three SQL Server join algorithms, run side by side on the same 8 orders and 6 customers, with a
+// cost estimate at real table sizes underneath. Algorithms and cost model: src/scripts/joins/model.ts.
+import '../styles/tools.css';
+---
+
+<div class="joins-demo" data-pagefind-ignore>
+  <div class="jn-stage" data-jn="stage">
+    <canvas
+      data-jn="canvas"
+      role="img"
+      aria-label="Three lanes of blocks. Amber blocks are orders, each labelled with the customer it belongs to; teal blocks are customers. Each lane joins them with a different algorithm and counts its steps. The results table below gives the same comparison as text."
+    ></canvas>
+    <ul class="jn-legend" aria-hidden="true">
+      <li><span style="--dot: #E2BD73"></span>Order → its CustomerId</li>
+      <li><span style="--dot: #8FCBBE"></span>Customer</li>
+      <li><span style="--dot: #9ED39A"></span>Joined row</li>
+    </ul>
+  </div>
+
+  <div class="jn-status" data-jn="status" aria-live="polite"></div>
+
+  <div class="tool jn-panel">
+    <div class="jn-row">
+      <button type="button" class="primary" data-action="play">Pause</button>
+      <button type="button" data-action="step">Step</button>
+      <button type="button" data-action="restart">Restart</button>
+      <label class="jn-inline">
+        Speed
+        <select data-field="speed">
+          <option value="0.5">Slow</option>
+          <option value="1" selected>Normal</option>
+          <option value="2.5">Fast</option>
+        </select>
+      </label>
+    </div>
+    <div class="jn-row">
+      <label class="jn-check"><input type="checkbox" data-field="index" checked /> Index on Customers.CustomerId</label>
+      <label class="jn-check"><input type="checkbox" data-field="sorted" /> Orders already in CustomerId order</label>
+    </div>
+    <p class="jn-note">The animation joins 8 orders to 6 customers so you can follow every step. The table below scales the same choices up to real sizes.</p>
+  </div>
+
+  <section class="jn-section" aria-labelledby="jn-scale-title">
+    <h3 id="jn-scale-title">At real sizes</h3>
+    <div class="jn-scenarios" role="group" aria-label="Scenario" data-jn="scenarios"></div>
+    <p class="jn-story" data-jn="story"></p>
+    <div class="jn-sliders">
+      <label>
+        <span class="jn-label-row">Orders to join <output data-out="orders"></output></span>
+        <input type="range" data-field="orders" min="0" max="1000" step="1" />
+      </label>
+      <label>
+        <span class="jn-label-row">Customers <output data-out="customers"></output></span>
+        <input type="range" data-field="customers" min="0" max="1000" step="1" />
+      </label>
+    </div>
+    <div class="jn-table-wrap">
+      <table class="jn-table">
+        <thead>
+          <tr><th scope="col">Algorithm</th><th scope="col">Pages read</th><th scope="col">Rows compared</th><th scope="col">Memory</th><th scope="col">Work</th></tr>
+        </thead>
+        <tbody data-jn="estimates"></tbody>
+      </table>
+    </div>
+    <p class="jn-verdict" data-jn="verdict" aria-live="polite"></p>
+  </section>
+</div>
+
+<script>
+  import * as THREE from 'three';
+  import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+  import { CSS2DRenderer, CSS2DObject } from 'three/examples/jsm/renderers/CSS2DRenderer.js';
+  import { trackExperiment } from '../scripts/analytics';
+  import {
+    SAMPLE_ORDERS,
+    customerRow,
+    nestedLoops,
+    hashJoin,
+    mergeJoin,
+    estimate,
+    pagesFor,
+    indexDepth,
+    CUSTOMERS_PER_PAGE,
+    ORDERS_PER_PAGE,
+    SCENARIOS,
+    NAMES,
+    type Algorithm,
+    type Event,
+    type Slot,
+    type Sizes,
+  } from '../scripts/joins/model';
+
+  const AMBER = '#E2BD73';
+  const TEAL = '#8FCBBE';
+  const GREEN = '#9ED39A';
+  const LANE_Z: Record<Algorithm, number> = { loops: 7.2, hash: 0, merge: -7.2 };
+  const BLOCK = 0.95;
+  const GAP = 1.15;
+
+  const root = document.querySelector<HTMLElement>('.joins-demo');
+  if (root) init(root);
+
+  function init(root: HTMLElement) {
+    const q = <T extends HTMLElement>(sel: string) => root.querySelector<T>(sel)!;
+    const stage = q<HTMLElement>('[data-jn="stage"]');
+    const canvas = q<HTMLCanvasElement>('[data-jn="canvas"]');
+    const field = <T extends HTMLInputElement | HTMLSelectElement>(name: string) => q<T>(`[data-field="${name}"]`);
+    const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+    // ---------- Scene ----------
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(40, 1, 0.1, 200);
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setClearColor(0x1e2528);
+    scene.add(new THREE.AmbientLight(0xffffff, 1.5));
+    const sun = new THREE.DirectionalLight(0xffffff, 1.8);
+    sun.position.set(-4, 10, 8);
+    scene.add(sun);
+
+    const labelRenderer = new CSS2DRenderer();
+    labelRenderer.domElement.className = 'jn-labels';
+    stage.appendChild(labelRenderer.domElement);
+
+    const target = new THREE.Vector3(0.5, 0, 2.4);
+    camera.position.set(0.5, 20, 17);
+    let controls: OrbitControls | null = null;
+    if (window.matchMedia('(pointer: fine)').matches) {
+      controls = new OrbitControls(camera, canvas);
+      controls.target.copy(target);
+      controls.enableZoom = false;
+      controls.enablePan = false;
+      controls.enableDamping = true;
+      controls.minPolarAngle = 0.3;
+      controls.maxPolarAngle = 1.25;
+    }
+
+    // Floors under each lane
+    for (const z of Object.values(LANE_Z)) {
+      const floor = new THREE.Mesh(new THREE.PlaneGeometry(17, 6.4), new THREE.MeshLambertMaterial({ color: 0x283033 }));
+      floor.rotation.x = -Math.PI / 2;
+      floor.position.set(0.5, -BLOCK / 2 - 0.01, z);
+      scene.add(floor);
+    }
+
+    // ---------- Blocks ----------
+    const textures = new Map<string, THREE.CanvasTexture>();
+    function faceTexture(text: string, bg: string) {
+      const key = `${text}|${bg}`;
+      let tex = textures.get(key);
+      if (!tex) {
+        const c = document.createElement('canvas');
+        c.width = c.height = 128;
+        const g = c.getContext('2d')!;
+        g.fillStyle = bg;
+        g.fillRect(0, 0, 128, 128);
+        g.fillStyle = '#1e2528';
+        g.font = `700 ${text.length > 2 ? 56 : 72}px "Instrument Sans", system-ui, sans-serif`;
+        g.textAlign = 'center';
+        g.textBaseline = 'middle';
+        g.fillText(text, 64, 70);
+        tex = new THREE.CanvasTexture(c);
+        tex.colorSpace = THREE.SRGBColorSpace;
+        textures.set(key, tex);
+      }
+      return tex;
+    }
+
+    interface Block {
+      mesh: THREE.Mesh;
+      mat: THREE.MeshLambertMaterial;
+      target: THREE.Vector3;
+      flash: number;
+      flashColour: THREE.Color;
+    }
+
+    const geo = new THREE.BoxGeometry(BLOCK, BLOCK, BLOCK);
+    function makeBlock(text: string, bg: string, lane: THREE.Group, at: THREE.Vector3): Block {
+      const mat = new THREE.MeshLambertMaterial({ map: faceTexture(text, bg) });
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.position.copy(at);
+      lane.add(mesh);
+      return { mesh, mat, target: at.clone(), flash: 0, flashColour: new THREE.Color() };
+    }
+
+    // Positions inside a lane, from the event slots in the model
+    const ordersX = (k: number) => -6.5 + k * GAP;
+    const bucketX = (b: number) => -6.5 + b * 2.3;
+    function slotPosition(s: Slot) {
+      switch (s.area) {
+        case 'orders':
+          return new THREE.Vector3(ordersX(s.index), 0, 1.4);
+        case 'customers':
+          return new THREE.Vector3(ordersX(s.index), 0, -1.4);
+        case 'probe':
+          return new THREE.Vector3(-3.6, 0, 0);
+        case 'bucket':
+          return new THREE.Vector3(bucketX(s.bucket), s.level * 1.05, -1.4);
+        case 'bucket-front':
+          return new THREE.Vector3(bucketX(s.bucket), 0, 0);
+        case 'output':
+          return new THREE.Vector3(3.8 + (s.index % 4) * GAP, Math.floor(s.index / 4) * 1.05, 0);
+      }
+    }
+
+    // ---------- Lanes ----------
+    interface Lane {
+      algorithm: Algorithm;
+      group: THREE.Group;
+      blocks: Map<string, Block>;
+      gen: Generator<Event>;
+      steps: number;
+      comparisons: number;
+      outputs: number;
+      done: boolean;
+      finishedAs: number;
+      card: HTMLElement;
+      buckets: THREE.Object3D[];
+    }
+
+    let lanes: Lane[] = [];
+    let finishedCount = 0;
+    const statusEl = q<HTMLElement>('[data-jn="status"]');
+
+    function buildLane(algorithm: Algorithm, index: boolean, sorted: boolean): Lane {
+      const group = new THREE.Group();
+      group.position.z = LANE_Z[algorithm];
+      scene.add(group);
+      const blocks = new Map<string, Block>();
+      SAMPLE_ORDERS.forEach((c, k) => blocks.set(`o${k}`, makeBlock(`→${c}`, AMBER, group, slotPosition({ area: 'orders', index: k }))));
+      customerRow(index).forEach((c, j) => blocks.set(`c${j}`, makeBlock(String(c), TEAL, group, slotPosition({ area: 'customers', index: j }))));
+
+      // Bucket markers for the hash lane
+      const buckets: THREE.Object3D[] = [];
+      if (algorithm === 'hash') {
+        for (let b = 0; b < 3; b++) {
+          const ring = new THREE.Mesh(new THREE.BoxGeometry(BLOCK + 0.3, 0.06, BLOCK + 0.3), new THREE.MeshLambertMaterial({ color: 0x5c6461 }));
+          ring.position.set(bucketX(b), -BLOCK / 2 - 0.02, -1.4);
+          const el = document.createElement('div');
+          el.className = 'jn-bucket';
+          el.textContent = `bucket ${b}`;
+          const lbl = new CSS2DObject(el);
+          lbl.position.set(bucketX(b), -BLOCK / 2, -2.4);
+          group.add(ring, lbl);
+          buckets.push(ring, lbl);
+        }
+      }
+
+      // The lane's name sits in the scene; its progress goes in the status bar under the canvas
+      const tag = document.createElement('div');
+      tag.className = 'jn-lane-tag';
+      tag.textContent = NAMES[algorithm];
+      const tagObj = new CSS2DObject(tag);
+      tagObj.position.set(-5.3, -BLOCK / 2, 2.55);
+      group.add(tagObj);
+
+      const card = document.createElement('div');
+      card.className = 'jn-card';
+      card.innerHTML = `<strong>${NAMES[algorithm]}</strong><span data-phase></span><span data-steps></span>`;
+      statusEl.append(card);
+
+      const gen = algorithm === 'loops' ? nestedLoops(index) : algorithm === 'hash' ? hashJoin(index) : mergeJoin(sorted, index);
+      const lane: Lane = { algorithm, group, blocks, gen, steps: 0, comparisons: 0, outputs: 0, done: false, finishedAs: 0, card, buckets };
+
+      // Moves before the first phase are the starting layout (orders handed over already sorted): apply them instantly
+      let first = gen.next();
+      while (!first.done && first.value.t === 'move') {
+        const b = blocks.get(first.value.id)!;
+        b.target.copy(slotPosition(first.value.to));
+        b.mesh.position.copy(b.target);
+        first = gen.next();
+      }
+      pending.set(lane, first);
+      updateCard(lane);
+      return lane;
+    }
+
+    const pending = new Map<Lane, IteratorResult<Event>>();
+
+    function setPhase(lane: Lane, text: string) {
+      lane.card.querySelector('[data-phase]')!.textContent = text;
+    }
+
+    function updateCard(lane: Lane) {
+      const steps = lane.card.querySelector('[data-steps]')!;
+      if (lane.done) {
+        const place = ['', 'Finished first', 'Finished second', 'Finished third'][lane.finishedAs] ?? 'Finished';
+        steps.textContent = `${place}: ${lane.steps} steps, ${lane.comparisons} comparisons`;
+      } else {
+        steps.textContent = `${lane.steps} steps · ${lane.comparisons} comparisons · ${lane.outputs}/8 joined`;
+      }
+      lane.card.classList.toggle('jn-card-done', lane.done);
+      lane.card.classList.toggle('jn-card-first', lane.done && lane.finishedAs === 1);
+    }
+
+    // Advance one lane by one visible step
+    function advance(lane: Lane) {
+      if (lane.done) return;
+      let res = pending.get(lane)!;
+      while (!res.done && res.value.t === 'phase') {
+        setPhase(lane, res.value.text);
+        res = lane.gen.next();
+      }
+      if (res.done) {
+        lane.done = true;
+        lane.finishedAs = ++finishedCount;
+        setPhase(lane, 'All 8 orders joined');
+        updateCard(lane);
+        return;
+      }
+      const ev = res.value;
+      lane.steps++;
+      if (ev.t === 'move') {
+        lane.blocks.get(ev.id)!.target.copy(slotPosition(ev.to));
+      } else if (ev.t === 'compare') {
+        lane.comparisons++;
+        for (const id of [ev.a, ev.b]) {
+          const b = lane.blocks.get(id)!;
+          b.flash = 1;
+          b.flashColour.set(ev.match ? GREEN : '#ffffff');
+        }
+      } else if (ev.t === 'output') {
+        const b = lane.blocks.get(ev.order)!;
+        b.target.copy(slotPosition({ area: 'output', index: lane.outputs }));
+        const customerId = SAMPLE_ORDERS[Number(ev.order.slice(1))];
+        b.mat.map = faceTexture(`${customerId}✓`, GREEN);
+        b.mat.needsUpdate = true;
+        lane.outputs++;
+      }
+      pending.set(lane, lane.gen.next());
+      updateCard(lane);
+    }
+
+    function clearLanes() {
+      for (const lane of lanes) {
+        lane.card.remove();
+        lane.group.traverse((o) => {
+          if (o instanceof CSS2DObject) o.element.remove();
+          if (o instanceof THREE.Mesh) {
+            (o.material as THREE.Material).dispose();
+            if (o.geometry !== geo) o.geometry.dispose();
+          }
+        });
+        scene.remove(lane.group);
+      }
+      lanes = [];
+      pending.clear();
+      finishedCount = 0;
+    }
+
+    function restart() {
+      clearLanes();
+      const index = field<HTMLInputElement>('index').checked;
+      const sorted = field<HTMLInputElement>('sorted').checked;
+      lanes = (['loops', 'hash', 'merge'] as Algorithm[]).map((a) => buildLane(a, index, sorted));
+      tickTimer = 0;
+    }
+
+    // ---------- Playback ----------
+    let playing = !reducedMotion;
+    let speed = 1;
+    let tickTimer = 0;
+    const TICK = 0.45; // seconds per step at normal speed
+    const playBtn = q<HTMLButtonElement>('[data-action="play"]');
+    const syncPlay = () => (playBtn.textContent = playing ? 'Pause' : lanes.every((l) => l.done) ? 'Play again' : 'Play');
+
+    playBtn.addEventListener('click', () => {
+      if (lanes.every((l) => l.done)) {
+        restart();
+        playing = true;
+      } else {
+        playing = !playing;
+      }
+      syncPlay();
+      trackExperiment('joins', playing ? 'play' : 'pause');
+    });
+    q('[data-action="step"]').addEventListener('click', () => {
+      playing = false;
+      lanes.forEach(advance);
+      syncPlay();
+    });
+    q('[data-action="restart"]').addEventListener('click', () => {
+      restart();
+      trackExperiment('joins', 'restart');
+    });
+    field<HTMLSelectElement>('speed').addEventListener('change', (e) => (speed = Number((e.target as HTMLSelectElement).value)));
+    for (const name of ['index', 'sorted']) {
+      field<HTMLInputElement>(name).addEventListener('change', () => {
+        restart();
+        updateEstimates();
+        trackExperiment('joins', `toggle:${name}`);
+      });
+    }
+
+    // ---------- Estimates at real sizes ----------
+    const ordersFromSlider = (v: number) => Math.max(1, Math.round(10 ** ((v / 1000) * 6)));
+    const customersFromSlider = (v: number) => Math.round(10 ** (2 + (v / 1000) * 4));
+    const sliderForOrders = (n: number) => String(Math.round((Math.log10(n) / 6) * 1000));
+    const sliderForCustomers = (n: number) => String(Math.round(((Math.log10(n) - 2) / 4) * 1000));
+    const fmt = (n: number) => Math.round(n).toLocaleString('en-GB');
+    const fmtKb = (kb: number) => (kb < 1 ? '–' : kb < 1024 ? `${Math.round(kb)} KB` : `${(kb / 1024).toFixed(1)} MB`);
+
+    // A scenario's exact sizes, until a slider moves (slider positions round them slightly)
+    let exact: { orders: number; customers: number } | null = null;
+
+    function sizes(): Sizes {
+      return {
+        orders: exact?.orders ?? ordersFromSlider(Number(field('orders').value)),
+        customers: exact?.customers ?? customersFromSlider(Number(field('customers').value)),
+        customerIndex: field<HTMLInputElement>('index').checked,
+        ordersSorted: field<HTMLInputElement>('sorted').checked,
+      };
+    }
+
+    // The most orders for which nested loops still does the least work
+    function loopsLimit(s: Sizes) {
+      if (!s.customerIndex) return 0;
+      let lo = 0;
+      let hi = 1_000_000;
+      const loopsBest = (o: number) => {
+        const e = estimate({ ...s, orders: o });
+        return e[0].work <= Math.min(e[1].work, e[2].work);
+      };
+      if (!loopsBest(1)) return 0;
+      lo = 1;
+      while (hi - lo > 1) {
+        const mid = Math.floor((lo + hi) / 2);
+        if (loopsBest(mid)) lo = mid;
+        else hi = mid;
+      }
+      return lo;
+    }
+
+    function updateEstimates() {
+      const s = sizes();
+      q('[data-out="orders"]').textContent = fmt(s.orders);
+      q('[data-out="customers"]').textContent = fmt(s.customers);
+      const est = estimate(s);
+      const best = [...est].sort((a, b) => a.work - b.work)[0];
+      const maxLog = Math.log10(Math.max(...est.map((e) => e.work)) + 1);
+
+      q('[data-jn="estimates"]').replaceChildren(
+        ...est.map((e) => {
+          const tr = document.createElement('tr');
+          if (e === best) tr.className = 'jn-best';
+          const width = Math.max(4, (Math.log10(e.work + 1) / maxLog) * 100);
+          tr.innerHTML = `<th scope="row">${NAMES[e.algorithm]}${e === best ? ' <span class="jn-tag">least work</span>' : ''}</th><td>${fmt(e.pagesRead)}</td><td>${fmt(e.comparisons)}</td><td>${fmtKb(e.memoryKb)}</td><td><span class="jn-bar" style="--w:${width}%"></span>${fmt(e.work)}</td>`;
+          return tr;
+        })
+      );
+
+      const oPages = pagesFor(s.orders, ORDERS_PER_PAGE);
+      const cPages = pagesFor(s.customers, CUSTOMERS_PER_PAGE);
+      const depth = indexDepth(cPages);
+      const loops = est[0];
+      let verdict = '';
+      if (best.algorithm === 'loops') {
+        verdict = `Nested loops does the least work. ${fmt(s.orders)} order${s.orders === 1 ? '' : 's'} × a ${depth}-page index seek is ${fmt(loops.pagesRead)} page reads, including the orders themselves, against ${fmt(oPages + cPages)} to read both tables in full.`;
+      } else if (best.algorithm === 'hash') {
+        verdict = `Hash match does the least work. It reads each table once (${fmt(oPages + cPages)} pages) and builds a hash table of about ${fmtKb(best.memoryKb)} from the smaller input. ${
+          s.customerIndex
+            ? `Nested loops would need ${fmt(loops.pagesRead)} page reads: one index seek per order adds up.`
+            : `Without an index, nested loops would read the whole customer table once per order: ${fmt(loops.pagesRead)} pages.`
+        } Merge would read the same pages as hash but has to sort ${!s.ordersSorted && !s.customerIndex ? 'both inputs' : !s.customerIndex ? 'the customers' : 'the orders'} first.`;
+      } else {
+        verdict = `Merge join does the least work: both inputs already arrive in CustomerId order, so it reads each table once (${fmt(oPages + cPages)} pages) and needs no sort and no extra memory. Hash would read the same pages but needs about ${fmtKb(est[1].memoryKb)} for its hash table.`;
+      }
+      const limit = loopsLimit(s);
+      if (limit > 0 && limit < 1_000_000) verdict += ` With ${fmt(s.customers)} customers, nested loops stays cheapest up to about ${fmt(limit)} orders.`;
+      q('[data-jn="verdict"]').textContent = verdict;
+    }
+
+    for (const name of ['orders', 'customers'])
+      field(name).addEventListener('input', () => {
+        exact = null;
+        scenariosEl.querySelectorAll('button').forEach((b) => b.setAttribute('aria-pressed', 'false'));
+        q('[data-jn="story"]').textContent = 'Your own sizes.';
+        updateEstimates();
+      });
+    for (const name of ['orders', 'customers']) field(name).addEventListener('change', () => trackExperiment('joins', `slider:${name}`));
+
+    const scenariosEl = q<HTMLElement>('[data-jn="scenarios"]');
+    function applyScenario(id: string, via: string) {
+      const sc = SCENARIOS.find((s) => s.id === id)!;
+      scenariosEl.querySelectorAll('button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.scenario === id)));
+      q('[data-jn="story"]').textContent = sc.story;
+      field('orders').value = sliderForOrders(sc.sizes.orders);
+      field('customers').value = sliderForCustomers(sc.sizes.customers);
+      const changed = field<HTMLInputElement>('index').checked !== sc.sizes.customerIndex || field<HTMLInputElement>('sorted').checked !== sc.sizes.ordersSorted;
+      field<HTMLInputElement>('index').checked = sc.sizes.customerIndex;
+      field<HTMLInputElement>('sorted').checked = sc.sizes.ordersSorted;
+      // Slider positions are rounded, so the estimate uses the scenario's exact sizes
+      exact = { orders: sc.sizes.orders, customers: sc.sizes.customers };
+      updateEstimates();
+      if (changed && via !== 'init') restart();
+      if (via !== 'init') trackExperiment('joins', `scenario:${id}`);
+    }
+    scenariosEl.replaceChildren(
+      ...SCENARIOS.map((sc) => {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'small';
+        b.dataset.scenario = sc.id;
+        b.setAttribute('aria-pressed', 'false');
+        b.textContent = sc.title;
+        b.addEventListener('click', () => applyScenario(sc.id, 'button'));
+        return b;
+      })
+    );
+
+    // ---------- Render loop ----------
+    function fit() {
+      const w = stage.clientWidth;
+      const h = stage.clientHeight;
+      if (!w || !h) return;
+      camera.aspect = w / h;
+      const dist = 24 / Math.min(1, camera.aspect * 0.75);
+      const dir = camera.position.clone().sub(target).normalize();
+      camera.position.copy(target).addScaledVector(dir, dist);
+      camera.updateProjectionMatrix();
+      renderer.setSize(w, h, false);
+      labelRenderer.setSize(w, h);
+    }
+    new ResizeObserver(fit).observe(stage);
+
+    let last = performance.now();
+    const base = new THREE.Color(0x000000);
+    function frame(t: number) {
+      const dt = Math.min(0.1, (t - last) / 1000);
+      last = t;
+      if (playing && lanes.some((l) => !l.done)) {
+        tickTimer += dt * speed;
+        while (tickTimer >= TICK) {
+          tickTimer -= TICK;
+          lanes.forEach(advance);
+        }
+        if (lanes.every((l) => l.done)) {
+          playing = false;
+          syncPlay();
+        }
+      }
+      const k = 1 - Math.exp(-dt * 12 * Math.max(1, speed));
+      for (const lane of lanes) {
+        for (const b of lane.blocks.values()) {
+          b.mesh.position.lerp(b.target, k);
+          if (b.flash > 0) b.flash = Math.max(0, b.flash - dt * 2.5 * Math.max(1, speed));
+          b.mat.emissive.copy(base).lerp(b.flashColour, b.flash * 0.6);
+        }
+      }
+      controls?.update();
+      renderer.render(scene, camera);
+      labelRenderer.render(scene, camera);
+    }
+
+    new IntersectionObserver(([entry]) => {
+      if (entry.isIntersecting) {
+        last = performance.now();
+        renderer.setAnimationLoop(frame);
+      } else {
+        renderer.setAnimationLoop(null);
+      }
+    }).observe(stage);
+
+    applyScenario('report', 'init');
+    restart();
+    syncPlay();
+    fit();
+  }
+</script>
+
+<style is:global>
+  .joins-demo {
+    margin: 2rem 0;
+  }
+
+  .jn-stage {
+    position: relative;
+    aspect-ratio: 4 / 3;
+    overflow: hidden;
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-lg);
+    background: var(--surface-inverse);
+  }
+
+  .jn-stage canvas {
+    display: block;
+    width: 100%;
+    height: 100%;
+  }
+
+  .jn-labels {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+  }
+
+  .jn-lane-tag {
+    padding: 1px 7px;
+    border-radius: var(--radius-xs);
+    background: rgba(30, 37, 40, 0.85);
+    color: var(--syn-text);
+    font-family: var(--font-sans);
+    font-size: 11.5px;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+
+  .jn-status {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 8px;
+    margin-top: 10px;
+  }
+
+  .jn-card {
+    display: grid;
+    align-content: start;
+    gap: 2px;
+    padding: 8px 10px;
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-md);
+    background: var(--surface-card);
+    font-size: 13px;
+    line-height: 1.35;
+  }
+
+  .jn-card [data-phase] {
+    min-height: 2.7em;
+    color: var(--text-body);
+  }
+
+  .jn-card [data-steps] {
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+  }
+
+  .jn-card-done {
+    border-color: var(--green-500);
+  }
+
+  .jn-card-first {
+    background: var(--success-bg);
+    box-shadow: inset 0 0 0 1px var(--green-500);
+  }
+
+  .jn-bucket {
+    color: var(--syn-muted);
+    font-family: var(--font-mono);
+    font-size: 10px;
+  }
+
+  .jn-legend {
+    position: absolute;
+    top: 10px;
+    right: 12px;
+    z-index: 1;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 12px;
+    margin: 0;
+    padding: 5px 9px;
+    border-radius: var(--radius-sm);
+    background: rgba(30, 37, 40, 0.85);
+    list-style: none;
+    color: var(--syn-muted);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    pointer-events: none;
+  }
+
+  .joins-demo .jn-legend li {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    margin: 0;
+  }
+
+  .jn-legend span {
+    width: 10px;
+    height: 10px;
+    border-radius: 2px;
+    background: var(--dot);
+  }
+
+  .jn-panel {
+    margin-top: 12px;
+  }
+
+  .jn-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px 16px;
+  }
+
+  .joins-demo .tool label.jn-inline {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .joins-demo .tool label.jn-inline select {
+    width: auto;
+  }
+
+  .joins-demo .tool label.jn-check {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .jn-check input,
+  .joins-demo input[type='range'] {
+    accent-color: var(--accent);
+  }
+
+  .joins-demo .jn-note {
+    margin: 0;
+    color: var(--text-muted);
+    font-size: var(--fs-small);
+  }
+
+  .jn-section {
+    margin-top: 12px;
+    padding: 16px 20px;
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-lg);
+    background: var(--surface-card);
+  }
+
+  .joins-demo .jn-section h3 {
+    margin: 0 0 10px;
+    font-size: 16px;
+  }
+
+  .jn-scenarios {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .jn-scenarios button {
+    padding: 4px 10px;
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-md);
+    background: var(--surface-raised);
+    color: var(--text-strong);
+    font: inherit;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+  }
+
+  .jn-scenarios button[aria-pressed='true'] {
+    border-color: var(--accent);
+    background: var(--accent-tint);
+  }
+
+  .joins-demo .jn-story {
+    margin: 10px 0;
+    font-size: var(--fs-small);
+  }
+
+  .jn-sliders {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 12px 20px;
+    font-size: 14px;
+    font-weight: 500;
+  }
+
+  .jn-sliders label {
+    display: grid;
+    gap: 4px;
+  }
+
+  .jn-label-row {
+    display: flex;
+    justify-content: space-between;
+  }
+
+  .jn-label-row output {
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    font-weight: 400;
+  }
+
+  .jn-table-wrap {
+    margin-top: 12px;
+    overflow-x: auto;
+  }
+
+  .joins-demo .jn-table {
+    width: 100%;
+    margin: 0;
+    border-collapse: collapse;
+    font-size: 13.5px;
+  }
+
+  .joins-demo .jn-table th,
+  .joins-demo .jn-table td {
+    padding: 6px 8px;
+    border-bottom: 1px solid var(--border-subtle);
+    text-align: left;
+    white-space: nowrap;
+  }
+
+  .joins-demo .jn-table td {
+    font-family: var(--font-mono);
+  }
+
+  .joins-demo .jn-table td:last-child {
+    min-width: 0;
+  }
+
+  .jn-bar {
+    display: inline-block;
+    width: calc(var(--w) * 0.6);
+    max-width: 56px;
+    height: 8px;
+    margin-right: 6px;
+    border-radius: 4px;
+    background: var(--slate-500);
+    vertical-align: middle;
+  }
+
+  .jn-best td,
+  .jn-best th {
+    background: var(--accent-tint);
+  }
+
+  .jn-best .jn-bar {
+    background: var(--accent);
+  }
+
+  .jn-tag {
+    margin-left: 4px;
+    padding: 1px 6px;
+    border-radius: var(--radius-pill);
+    background: var(--accent);
+    color: var(--accent-on);
+    font-size: 11px;
+    font-weight: 600;
+  }
+
+  .joins-demo .jn-verdict {
+    margin: 12px 0 0;
+    font-size: var(--fs-small);
+  }
+
+  @media (max-width: 640px) {
+    .jn-stage {
+      aspect-ratio: auto;
+      height: 400px;
+    }
+
+    .jn-legend {
+      display: none;
+    }
+
+    .jn-status {
+      grid-template-columns: 1fr;
+    }
+
+    .jn-card [data-phase] {
+      min-height: 0;
+    }
+  }
+</style>
