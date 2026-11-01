@@ -1,0 +1,221 @@
+---
+// Checks AI-written T-SQL for the mistakes that matter before it runs: what it changes, and how it could be wrong.
+// Everything runs in the browser; the SQL is never sent anywhere.
+import '../styles/tools.css';
+import { SAMPLES } from '../scripts/sqlreview/review';
+---
+
+<div class="tool ai-sql" data-tool="ai-sql-review" data-pagefind-ignore>
+  <div class="ai-sql-samples" role="group" aria-label="Examples">
+    <span class="ai-sql-label">Try an example</span>
+    <div class="tool-actions">
+      {SAMPLES.map((s, i) => (
+        <button type="button" class="small" data-sample={s.id} aria-pressed={i === 0 ? 'true' : 'false'}>{s.label}</button>
+      ))}
+    </div>
+  </div>
+
+  <label>
+    SQL to check
+    <textarea data-field="sql" spellcheck="false" rows="12" aria-describedby="ai-sql-note"></textarea>
+  </label>
+  <p class="tool-status" id="ai-sql-note">Paste a query your AI assistant wrote. It's checked as you type, in your browser; nothing is sent anywhere.</p>
+
+  <div class="ai-sql-result" data-field="result" aria-live="polite">
+    <div class="ai-sql-verdict" data-field="verdict">
+      <strong data-field="headline"></strong>
+      <span data-field="summary"></span>
+    </div>
+    <ul class="ai-sql-findings" data-field="findings"></ul>
+  </div>
+</div>
+
+<script>
+  import { review, SAMPLES } from '../scripts/sqlreview/review';
+  import { trackToolUse } from '../scripts/analytics';
+
+  const LABELS = { danger: 'Danger', warn: 'Check', info: 'Note', good: 'Good' } as const;
+
+  document.querySelectorAll<HTMLElement>('[data-tool="ai-sql-review"]').forEach((root) => {
+    const get = <T extends HTMLElement>(name: string) => root.querySelector<T>(`[data-field="${name}"]`)!;
+    const input = get<HTMLTextAreaElement>('sql');
+    const verdict = get<HTMLElement>('verdict');
+    const headline = get<HTMLElement>('headline');
+    const summary = get<HTMLElement>('summary');
+    const list = get<HTMLUListElement>('findings');
+    const buttons = [...root.querySelectorAll<HTMLButtonElement>('[data-sample]')];
+
+    const render = () => {
+      const r = review(input.value);
+      verdict.dataset.verdict = r.verdict;
+      headline.textContent = r.headline;
+      summary.textContent = r.summary;
+      list.replaceChildren(
+        ...r.findings.map((f) => {
+          const li = document.createElement('li');
+          li.dataset.severity = f.severity;
+          const badge = document.createElement('span');
+          badge.className = 'ai-sql-badge';
+          badge.textContent = LABELS[f.severity];
+          const body = document.createElement('div');
+          const title = document.createElement('p');
+          title.className = 'ai-sql-title';
+          title.textContent = f.title;
+          if (f.lines.length) {
+            const where = document.createElement('span');
+            where.className = 'ai-sql-lines';
+            where.textContent = `line${f.lines.length > 1 ? 's' : ''} ${f.lines.join(', ')}`;
+            title.append(' ', where);
+          }
+          const detail = document.createElement('p');
+          detail.className = 'ai-sql-detail';
+          detail.textContent = f.detail;
+          body.append(title, detail);
+          li.append(badge, body);
+          return li;
+        }),
+      );
+    };
+
+    const load = (id: string) => {
+      const s = SAMPLES.find((x) => x.id === id) ?? SAMPLES[0];
+      input.value = s.sql;
+      buttons.forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.sample === s.id)));
+      render();
+    };
+
+    buttons.forEach((b) =>
+      b.addEventListener('click', () => {
+        load(b.dataset.sample!);
+        trackToolUse('ai-sql-review', 'sample');
+      }),
+    );
+
+    let timer = 0;
+    let edited = false;
+    input.addEventListener('input', () => {
+      buttons.forEach((b) => b.setAttribute('aria-pressed', 'false'));
+      if (!edited) {
+        edited = true;
+        trackToolUse('ai-sql-review', 'check');
+      }
+      clearTimeout(timer);
+      timer = window.setTimeout(render, 120);
+    });
+
+    load(SAMPLES[0].id);
+  });
+</script>
+
+<style is:global>
+  .ai-sql .ai-sql-samples {
+    display: grid;
+    gap: 8px;
+  }
+
+  .ai-sql .ai-sql-label {
+    color: var(--text-strong);
+    font-size: 14px;
+    font-weight: 500;
+  }
+
+  .ai-sql button[aria-pressed='true'] {
+    border-color: var(--accent);
+    background: var(--accent);
+    color: var(--accent-on);
+  }
+
+  .ai-sql textarea[data-field='sql'] {
+    min-height: 15rem;
+    font-size: var(--fs-code);
+  }
+
+  .ai-sql .ai-sql-result {
+    display: grid;
+    gap: 12px;
+  }
+
+  .ai-sql .ai-sql-verdict {
+    display: grid;
+    gap: 2px;
+    padding: 12px 14px;
+    border-left: 4px solid var(--info-fg);
+    border-radius: var(--radius-md);
+    background: var(--info-bg);
+    color: var(--text-body);
+    font-size: var(--fs-small);
+  }
+
+  .ai-sql .ai-sql-verdict strong {
+    color: var(--info-fg);
+    font-size: 16px;
+  }
+
+  .ai-sql .ai-sql-verdict[data-verdict='read'] { border-color: var(--success-fg); background: var(--success-bg); }
+  .ai-sql .ai-sql-verdict[data-verdict='read'] strong { color: var(--success-fg); }
+  .ai-sql .ai-sql-verdict[data-verdict='write'],
+  .ai-sql .ai-sql-verdict[data-verdict='unknown'] { border-color: var(--warning-fg); background: var(--warning-bg); }
+  .ai-sql .ai-sql-verdict[data-verdict='write'] strong,
+  .ai-sql .ai-sql-verdict[data-verdict='unknown'] strong { color: var(--warning-fg); }
+  .ai-sql .ai-sql-verdict[data-verdict='schema'] { border-color: var(--danger-fg); background: var(--danger-bg); }
+  .ai-sql .ai-sql-verdict[data-verdict='schema'] strong { color: var(--danger-fg); }
+
+  .ai-sql .ai-sql-findings {
+    display: grid;
+    gap: 8px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .ai-sql .ai-sql-findings li {
+    display: grid;
+    grid-template-columns: 4.5rem 1fr;
+    gap: 12px;
+    align-items: start;
+    margin: 0;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--border-subtle);
+  }
+
+  .ai-sql .ai-sql-findings li + li {
+    margin-top: 0;
+  }
+
+  .ai-sql .ai-sql-badge {
+    display: inline-block;
+    padding: 2px 0;
+    border-radius: var(--radius-sm, 4px);
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-align: center;
+    text-transform: uppercase;
+  }
+
+  .ai-sql li[data-severity='danger'] .ai-sql-badge { background: var(--danger-bg); color: var(--danger-fg); }
+  .ai-sql li[data-severity='warn'] .ai-sql-badge { background: var(--warning-bg); color: var(--warning-fg); }
+  .ai-sql li[data-severity='info'] .ai-sql-badge { background: var(--info-bg); color: var(--info-fg); }
+  .ai-sql li[data-severity='good'] .ai-sql-badge { background: var(--success-bg); color: var(--success-fg); }
+
+  .ai-sql .ai-sql-title {
+    margin: 0;
+    color: var(--text-strong);
+    font-weight: 600;
+    overflow-wrap: anywhere;
+  }
+
+  .ai-sql .ai-sql-lines {
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    font-weight: 400;
+  }
+
+  .ai-sql .ai-sql-detail {
+    margin: 2px 0 0;
+    color: var(--text-body);
+    font-size: var(--fs-small);
+  }
+</style>

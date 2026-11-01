@@ -1,0 +1,272 @@
+---
+layout: ../../layouts/ContentLayout.astro
+title: "Letting an LLM Write SQL Against Production, Safely"
+description: "How to let an AI assistant or agent query a live SQL Server database without risking the data: a read-only login it can't escape, limits on what reads cost, and a reviewed, reversible path for changes."
+tags: [ai, llm, agents, sql-server, security, advanced]
+level: advanced
+updated: "2026-11-01"
+---
+
+import AiSqlReview from '../../components/AiSqlReview.astro';
+
+## The Real Risk
+
+Language models are good at SQL. Ask for "each customer's spend last month" and you'll get a query that runs first time. That's the problem. The query that runs first time isn't always the query you meant, and a model writes a wrong `WHERE` clause with exactly the same confidence as a right one.
+
+The model can't see your data. It doesn't know that `Status = 3` means cancelled, that `OrderDate` holds a time, or that `Customers` has duplicate rows from a 2019 migration. It fills the gaps with plausible guesses. Syntax errors are rare, and they're harmless anyway: the query fails. The dangerous mistakes are the ones that run.
+
+So the goal isn't a better prompt. A prompt is a request, not a control: models skip instructions, and anything an agent reads, such as an email, a ticket or a web page, can contain instructions of its own. The goal is a setup in which the model **can't** do damage, whatever it writes.
+
+That setup has four layers:
+
+1. A login that can only read, and only what the model needs.
+2. Limits on what a read can cost.
+3. The schema, explained, so its guesses are better.
+4. For changes: the model proposes, a person reviews, and the script is reversible.
+
+## Three Levels of Trust
+
+It helps to decide up front which of these you're doing:
+
+| Level | Who runs the SQL | What it needs |
+|-------|------------------|---------------|
+| **Assistant** | You copy it from the chat and run it | Your judgement, and the checks below |
+| **Agent, reading** | The agent runs queries itself, through a tool | A read-only login and limits, layers 1 and 2 |
+| **Agent, changing data** | Don't. The agent writes a script, a person runs it | The reversible pattern, layer 4 |
+
+There's no fourth row. An agent that runs `UPDATE` statements against production unattended is one wrong `OR` away from an incident, and the incident report will say the AI did it. Nobody will accept that as the cause.
+
+## Layer 1: A Login That Can't Do Damage
+
+Give the model's tool its own login. Never reuse yours, the application's, or an admin account. Permissions are the one control a model can't talk its way past.
+
+The simplest version is a member of `db_datareader`. Microsoft describes that role as being able to "read all data from all user tables and views", which is the problem: all of it, including names, emails, salaries and anything else that then goes into the model's context. Read access is still access, and whatever the model reads is sent to whoever runs the model.
+
+A better version gives the model a schema of views, showing only the columns it needs:
+
+```sql
+-- A login for the AI tool, and a user in the database
+CREATE LOGIN ai_reader WITH PASSWORD = '<from your secret store>';
+GO
+USE Shop;
+GO
+CREATE USER ai_reader FOR LOGIN ai_reader;
+GO
+
+-- A schema of views showing only what the model needs
+CREATE SCHEMA ai AUTHORIZATION dbo;
+GO
+CREATE VIEW ai.Orders AS
+SELECT OrderId, CustomerId, OrderDate, Status, Total
+FROM dbo.Orders;
+GO
+CREATE VIEW ai.Customers AS
+SELECT CustomerId, City, CreatedAt   -- no names, emails or phone numbers
+FROM dbo.Customers;
+GO
+
+-- Read access to those views, and nothing else
+GRANT SELECT ON SCHEMA::ai TO ai_reader;
+GRANT SHOWPLAN TO ai_reader;   -- lets the tool ask for an estimated plan first (layer 2)
+```
+
+The login has no permission on the `dbo` tables themselves. The views still work because of **ownership chaining**: the `ai` schema and the `dbo` tables have the same owner, so SQL Server checks permission on the view and not on the tables behind it. Dynamic SQL run with `EXEC` is checked against the login's own permissions, so it doesn't get round this.
+
+Some other points to know:
+
+- **Writes simply fail.** `UPDATE`, `DELETE`, `INSERT` and `DROP` all return a permission error. So does `SELECT ... INTO`, which needs `CREATE TABLE` permission and `ALTER` on the schema.
+- **The model only sees its own views.** SQL Server shows a user metadata only for objects it has some permission on, so `sys.views`, `sys.columns` and `INFORMATION_SCHEMA` list the `ai` views and not the tables behind them.
+- **Dynamic data masking isn't enough on its own.** It hides values in results, but Microsoft's documentation warns that users with ad hoc query access can infer masked values, for example by filtering `WHERE Salary > 99999 AND Salary < 100001`. A model with a query tool has ad hoc query access. Leave sensitive columns out of the views instead.
+- **Point it at a copy if you can.** A readable secondary replica or last night's restore keeps a heavy query away from the live workload. `ApplicationIntent=ReadOnly` in the connection string routes to a readable secondary through an availability group listener, but if no secondary is readable it connects to the primary instead. It's a routing hint, not a permission: the login is what keeps the data safe.
+
+## Layer 2: Limits on What a Read Can Cost
+
+A read-only login can't change data, but it can still hurt. A query that joins two big tables without a filter can read millions of rows, fill tempdb, hold a big memory grant and slow everyone else down. And then it sends a million rows to the model, which can't use them.
+
+Put the limits in the tool, not the prompt:
+
+```python
+import json, logging, re, time
+import pyodbc
+
+CONN = (
+    "Driver={ODBC Driver 18 for SQL Server};"
+    "Server=tcp:reporting-replica.internal,1433;Database=Shop;"
+    "UID=ai_reader;PWD=...;"            # from a secret store, never in code
+    "ApplicationIntent=ReadOnly;Encrypt=yes;"
+)
+MAX_ROWS = 200        # the model never needs more; ask it to aggregate
+MAX_COST = 50         # optimiser cost units; see below
+log = logging.getLogger("sql_tool")
+
+def estimated_cost(cur, sql):
+    """Ask SQL Server for the estimated plan. With SHOWPLAN_XML on, nothing is executed."""
+    cur.execute("SET SHOWPLAN_XML ON")
+    try:
+        cur.execute(sql)
+        plan = cur.fetchone()[0]
+    finally:
+        cur.execute("SET SHOWPLAN_XML OFF")
+    return sum(float(c) for c in re.findall(r'StatementSubTreeCost="([^"]+)"', plan))
+
+def run_query(sql: str) -> dict:
+    """Tool for the model: run one read-only query and return at most MAX_ROWS rows."""
+    started = time.time()
+    conn = pyodbc.connect(CONN, timeout=10)    # autocommit is off: the tool never commits
+    conn.timeout = 30                          # cancel anything that runs longer than 30 seconds
+    result = {}
+    try:
+        cur = conn.cursor()
+        cost = estimated_cost(cur, sql)
+        if cost > MAX_COST:
+            result = {"error": f"Estimated cost {cost:.0f} is over the limit of {MAX_COST}. Add a filter or aggregate."}
+        else:
+            cur.execute(sql)
+            if cur.description is None:
+                result = {"error": "The statement returned no rows. Only SELECT queries are allowed."}
+            else:
+                rows = cur.fetchmany(MAX_ROWS + 1)
+                result = {
+                    "columns": [c[0] for c in cur.description],
+                    "rows": [[None if v is None else str(v) for v in r] for r in rows[:MAX_ROWS]],
+                    "truncated": len(rows) > MAX_ROWS,
+                }
+    except pyodbc.Error as e:
+        result = {"error": str(e)}             # the model can read the error and try again
+    finally:
+        conn.rollback()                        # undo anything that somehow got through
+        conn.close()
+        log.info(json.dumps({"sql": sql, "seconds": round(time.time() - started, 2),
+                             "error": result.get("error")}))
+    return result
+
+TOOLS = {"run_query": run_query}
+```
+
+What each part does:
+
+- **Estimated plan first.** With `SET SHOWPLAN_XML ON`, SQL Server returns the plan it would use, with estimated rows and costs, and doesn't execute the statement. The tool refuses anything over a cost limit before it runs. The cost is the optimiser's own abstract unit, so pick the limit by looking at the costs of queries you're happy with. The [execution plan viewer](/experiments/sql-execution-plan-3d) shows what's in the plan. Estimates can be wrong, so this catches the obvious cases, not every one.
+- **A query timeout**, so a query the estimate got wrong still stops.
+- **A row cap.** The model gets 200 rows and a flag saying there were more. That keeps its context small, and pushes it to write `GROUP BY` queries that answer the question rather than fetching raw rows.
+- **No commit, ever.** pyodbc opens connections with autocommit off, so every statement runs inside a transaction that the tool rolls back. If permissions were ever wrong, a write still wouldn't be kept.
+- **A log of every query**, with how long it took. When a number from the model looks odd, the log shows the query that produced it. It's an audit trail like any other; see [Designing Audit Trails That Help Investigation](/patterns/audit-trails-for-investigation).
+
+Don't rely on `SET` options inside the session for hard limits. `SET QUERY_GOVERNOR_COST_LIMIT` exists and any user can set it, which is exactly why it isn't a control: the model's SQL runs on the same connection and can set it back to 0. For a limit the session can't change, use the server-wide setting, or **Resource Governor**, which can put the AI login in its own workload group with a capped memory grant, CPU and parallelism. From SQL Server 2025, Resource Governor is available in Standard edition as well as Enterprise, and can also limit tempdb use.
+
+## Layer 3: Give It the Schema, Not the Data
+
+Most wrong answers come from the model guessing what a column means. Give it a compact description of the schema at the start of every conversation. Running this as `ai_reader` lists exactly what it can see:
+
+```sql
+SELECT s.name + '.' + v.name AS [table],
+       STRING_AGG(CAST(c.name + ' ' + ty.name AS nvarchar(max)), ', ')
+           WITHIN GROUP (ORDER BY c.column_id) AS columns
+FROM sys.views AS v
+JOIN sys.schemas AS s ON s.schema_id = v.schema_id
+JOIN sys.columns AS c ON c.object_id = v.object_id
+JOIN sys.types AS ty ON ty.user_type_id = c.user_type_id
+WHERE s.name = N'ai'
+GROUP BY s.name, v.name;
+```
+
+That gives one line per view, such as `ai.Orders: OrderId int, CustomerId int, OrderDate datetime2, Status tinyint, Total decimal`. Then add what the names don't say. This is the part that matters most:
+
+```text
+ai.Orders.Status: 1 = open, 2 = paid, 3 = cancelled, 4 = refunded. Revenue means status 2 only.
+ai.Orders.OrderDate: date and time, UK time. "October" means >= '2026-10-01' and < '2026-11-01'.
+ai.Orders.Total: includes VAT. Excludes delivery, which is in ai.OrderCharges.
+ai.Customers: one row per account. A person can have several accounts.
+```
+
+Every line here prevents a specific wrong answer, and each one comes from a mistake you, or a colleague, already made once. Keep the file next to the views and update it when someone finds a new one.
+
+Then ask the model to **show its working** with every answer. That means the query, the filters in plain English, and any assumption it made:
+
+```text
+When you answer a question from the database:
+- Show the SQL you ran.
+- Say in one sentence which rows it counts, e.g. "paid orders placed in October, UK time".
+- List any assumption you made that the schema notes don't cover.
+- If a result looks surprising, say so instead of explaining it away.
+```
+
+Again, that's guidance, not a control. It doesn't stop anything; it makes mistakes easy to spot.
+
+## Layer 4: Changes Go Through a Person
+
+When the answer to a question is a data fix, the model's job is to write a script, and yours is to run it. The script should follow the same pattern as any production fix: see [Designing a Reversible Data Fix in SQL Server](/patterns/sql-reversible-data-fix). For a model, ask for a dry run that can't keep anything until a person decides:
+
+```sql
+SET XACT_ABORT ON;            -- any run-time error rolls back the whole transaction
+BEGIN TRANSACTION;
+
+DECLARE @expected int = 3;    -- from running the same WHERE as a SELECT first
+
+UPDATE i
+SET Status = 'Void'
+OUTPUT deleted.InvoiceId, deleted.Status, inserted.Status, SYSUTCDATETIME()
+  INTO dbo.DataFixAudit (InvoiceId, OldStatus, NewStatus, ChangedAt)
+FROM dbo.Invoices AS i
+WHERE i.CustomerId = 4182
+  AND i.InvoiceDate >= '2026-10-01' AND i.InvoiceDate < '2026-11-01'
+  AND i.Reference LIKE 'DUP-%';
+
+IF @@ROWCOUNT <> @expected
+BEGIN
+    ROLLBACK TRANSACTION;
+    THROW 50001, 'Unexpected row count, so nothing was changed.', 1;
+END;
+
+SELECT InvoiceId, Reference, Status
+FROM dbo.Invoices
+WHERE CustomerId = 4182 AND Status = 'Void';
+
+ROLLBACK TRANSACTION;         -- a dry run: change to COMMIT once the results look right
+```
+
+Each line is there for a reason:
+
+- **The expected count comes first.** Run the `WHERE` clause as a `SELECT` and agree the number before writing the `UPDATE`. A model that writes a wrong filter writes a wrong count too, so the count has to come from you looking at real rows.
+- **`@@ROWCOUNT` is checked straight after the change.** If it doesn't match, the transaction is rolled back and `THROW` stops the batch. It's the one check that catches the `AND`/`OR` mistake in the review example below, which looks fine when you read it.
+- **`OUTPUT ... INTO` keeps the old values**, so the change can be put back after it's committed. See [Record Changed Rows with OUTPUT INTO](/snippets/sql-output-into-audit).
+- **It ends in `ROLLBACK`.** Running it shows exactly what would change and keeps nothing. Committing is a deliberate edit by a person.
+
+The [Reversible Data Fix Script Builder](/tools/data-fix-script) generates the full version, including the backup table and the rollback script. You can describe the change to the model, then paste its filter into the builder rather than asking the model for the whole script.
+
+## Reviewing What the Model Wrote
+
+Whichever level you're working at, read the SQL before trusting the answer. Paste a query below to check it for the mistakes that come up most often in AI-written SQL. The examples include a report and a data fix, each as first written and after review, and the kind of "tidy-up" an agent should never be allowed to run.
+
+<AiSqlReview />
+
+The checker reads the text and nothing else. It doesn't know your schema, it can't run the query, and anyone trying to can fool it. It's a second pair of eyes for a person, not a gate for an agent. In an agent, the gate is layer 1: the login's permissions apply to whatever SQL the model writes, however it's disguised. The rules are in [`src/scripts/sqlreview/review.ts`](https://github.com/WebDevRock/WebDevRock/blob/main/src/scripts/sqlreview/review.ts).
+
+## Correct SQL, Wrong Answer
+
+Permissions stop damage. They don't stop a wrong answer from a query that runs perfectly. These are the mistakes worth checking for in every AI-written query, because they produce believable numbers:
+
+- **Join fan-out.** Join orders to order lines, then sum the order total, and every order is counted once per line. The total looks plausible, and it's double or triple the right one. Check the row count before and after each join. [How SQL Server Joins Tables](/experiments/sql-server-join-algorithms) shows how a join pairs rows.
+- **Dates with times.** `BETWEEN '2026-10-01' AND '2026-10-31'` stops at midnight at the start of the 31st. Use `>=` the first day and `<` the day after the last.
+- **`NOT IN` with a `NULL`.** If the subquery returns a single `NULL`, `NOT IN` matches nothing, and the query returns zero rows without an error. `NOT EXISTS` doesn't have the problem.
+- **`AND` before `OR`.** `a AND b OR c` means `(a AND b) OR c`. In a `SELECT` it gives a wrong answer; in an `UPDATE`, it changes rows nobody asked about.
+- **The wrong definition.** "Customers" might mean accounts or people. "Revenue" might include refunds. The schema notes in layer 3 are where these get decided once, rather than guessed each time.
+- **`NOLOCK`.** Models add it because the internet does. It can return changes that are later rolled back, and miss rows or read them twice while other sessions change the table. On a readable secondary or a restored copy, it isn't needed at all.
+
+The cheapest check of all: compare the answer against one number you already know. If the model's October revenue doesn't match the finance report, find out why before using anything else it produced.
+
+## A Short Checklist
+
+- [ ] The tool uses its own login, with `SELECT` on a schema of views and nothing else.
+- [ ] Sensitive columns are left out of the views, not masked.
+- [ ] It queries a replica or a copy where one exists.
+- [ ] The tool checks the estimated cost, has a timeout and a row cap, rolls back and logs every query.
+- [ ] Hard limits are in Resource Governor or server settings, not session `SET` options.
+- [ ] The model gets the schema plus notes on what columns mean, and shows its working.
+- [ ] Changes are scripts a person runs: a dry run with an expected row count, `OUTPUT` and a final `ROLLBACK`.
+
+## What's Next
+
+- [Building Your Own AI Agent System](/ai/building-agent-system): the agent this tool plugs into
+- [Architecting Multi-Agent Systems](/ai/multi-agent-architecture): security boundaries when several agents share tools
+- [Designing a Reversible Data Fix in SQL Server](/patterns/sql-reversible-data-fix): the pattern behind layer 4
+- [Reversible Data Fix Script Builder](/tools/data-fix-script)
