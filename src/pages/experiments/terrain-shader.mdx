@@ -1,0 +1,196 @@
+---
+layout: ../../layouts/ContentLayout.astro
+title: "Custom Shaders from First Principles: A Terrain Generator in Three.js"
+description: "Build a 3D landscape in seven steps with your own GLSL shaders: a grid of vertices, noise, fractal hills, colour by height, lighting, water and fog."
+tags: [threejs, visualization, shaders, glsl]
+updated: "2026-11-01"
+---
+
+import TerrainShaderDemo from '../../components/TerrainShaderDemo.astro';
+
+## Overview
+
+A **shader** is a small program that runs on the graphics card (GPU). Three.js's built-in materials are shaders too, written for you. Writing your own means you decide what happens to every vertex and every pixel.
+
+There are two kinds in this experiment:
+
+- A **vertex shader** runs once for every vertex (corner) of a mesh. It decides where that vertex ends up on screen, and it can move the vertex first.
+- A **fragment shader** runs once for every pixel a triangle covers. It decides that pixel's colour.
+
+The GPU runs many copies of each shader at once. That's why a shader can move 66,000 vertices and colour a million pixels every frame, but also why each copy works on its own, without seeing what its neighbours are doing.
+
+This page builds one landscape in seven steps, each adding a single idea. The code under the demo is exactly what the GPU is running for the current step. Lines that are new in a step are highlighted.
+
+## Demo
+
+<TerrainShaderDemo />
+
+Use **Next step** to go through in order. From step 3, **New landscape** picks a new seed. The same seed always gives the same landscape.
+
+## The steps
+
+### 1. A grid of points
+
+The mesh is a flat `PlaneGeometry`: a 20 × 20 square divided into a grid, with every small square made of two triangles. The vertex shader only places each vertex on screen:
+
+```glsl
+void main() {
+  vec3 pos = position;
+  vec4 world = modelMatrix * vec4(pos, 1.0);
+  gl_Position = projectionMatrix * viewMatrix * world;
+}
+```
+
+`position` is the vertex's position in the mesh. Multiplying by the model, view and projection matrices takes it into the world, then relative to the camera, then onto the screen. Three.js supplies all four. The fragment shader sets every pixel to one colour.
+
+### 2. Move the points
+
+Set `pos.y` before projecting and the grid bends:
+
+```glsl
+uniform float uTime;
+uniform float uHeight;
+
+float heightAt(vec2 xz) {
+  return sin(xz.x * 0.8 + uTime) * cos(xz.y * 0.6 + uTime * 0.7) * uHeight * 0.3;
+}
+```
+
+`uTime` and `uHeight` are **uniforms**: values set from JavaScript, the same for every vertex in a frame. The page adds the frame time to `uTime` and the waves move. JavaScript never touches the vertices themselves, which is why this stays fast however fine the grid is.
+
+### 3. Noise
+
+Landscapes aren't sine waves. **Value noise** gives smooth randomness: a random value at every point of a coarse grid, blended smoothly in between.
+
+```glsl
+float noise(vec2 p) {
+  vec2 i = floor(p);                  // which grid square we're in
+  vec2 f = fract(p);                  // where we are inside it, 0 to 1
+  vec2 u = f * f * (3.0 - 2.0 * f);   // ease the blend so there are no creases
+  float a = hash(i);
+  float b = hash(i + vec2(1.0, 0.0));
+  float c = hash(i + vec2(0.0, 1.0));
+  float d = hash(i + vec2(1.0, 1.0));
+  return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+```
+
+Shaders have no random number generator, and every vertex runs independently, so `hash()` turns coordinates into a random-looking number instead. That's what makes the terrain repeatable: the same coordinates always give the same height, in every vertex and on every frame. The seed just moves the starting point to a different part of the noise.
+
+### 4. Layers of noise
+
+One layer of noise gives rolling blobs. Real terrain has detail at every scale: hills, bumps on the hills, and stones on the bumps. **Fractal noise** (fractal Brownian motion, or fBm) adds layers called octaves, each twice as detailed and half as tall:
+
+```glsl
+for (int i = 0; i < 8; i++) {
+  if (i >= uOctaves) break;
+  sum += amp * noise(p);
+  total += amp;
+  p *= 2.0;     // twice the detail
+  amp *= 0.5;   // half the height
+}
+return sum / total;
+```
+
+Move **Octaves** from 1 to 8 to see the detail build up. The loop has a fixed limit of 8 with a `break`, because older versions of GLSL need a loop's limit to be a constant.
+
+Two more lines shape the result. Adding up layers of noise piles most values near the middle, so the shader stretches the range back out to 0–1. Then it squares the height, which keeps the low ground low and makes the peaks steeper.
+
+### 5. Colour by height
+
+Now the fragment shader does some work. The vertex shader passes each vertex's height to it through a **varying**:
+
+```glsl
+varying float vHeight;   // declared in both shaders
+vHeight = pos.y;         // set in the vertex shader
+```
+
+Each pixel receives a value blended from its triangle's three vertices. The fragment shader picks a colour from bands for water, sand, grass, forest, rock and snow, using `smoothstep()` to fade each band into the next instead of switching abruptly.
+
+The result is coloured, but flat-looking. Without light and shade, it's hard to see the shape.
+
+### 6. Light and shade
+
+Lighting needs the surface's **normal**: the direction it faces. The vertex shader works it out from the slope, by sampling the height a short distance away in two directions:
+
+```glsl
+float e = 0.05;
+float hx = heightAt(pos.xz + vec2(e, 0.0));
+float hz = heightAt(pos.xz + vec2(0.0, e));
+vNormal = normalize(vec3(pos.y - hx, e, pos.y - hz));
+```
+
+The fragment shader compares the normal with the sun's direction. The dot product of the two is 1 when the surface faces the sun directly, and 0 or less when it faces away:
+
+```glsl
+float light = max(dot(normalize(vNormal), uSunDir), 0.0);
+colour *= 0.35 + 0.75 * light;   // 0.35 is the light that reaches even the shady side
+```
+
+Turn **Sun direction** and the shadows swing round the hills.
+
+### 7. Water and fog
+
+The sea is a second, flat mesh at sea level with its own shader. It includes the same `heightAt()` function, so it can work out how deep the water is at each pixel:
+
+```glsl
+float depth = vWorldPos.y - heightAt(vWorldPos.xz);
+if (depth < 0.0) discard; // the land is above the water here, so draw nothing
+```
+
+`discard` throws the pixel away without drawing it. Deeper water is darker, fine noise drifting with time adds ripples, and a fade near zero depth draws foam along every shore. Change **Sea level** and the coastline redraws itself: nothing was precalculated.
+
+Fog takes three lines at the end of both fragment shaders:
+
+```glsl
+float fog = smoothstep(uFogNear, uFogFar, distance(vWorldPos, cameraPosition));
+colour = mix(colour, uFogColor, fog);
+```
+
+The further a pixel is from the camera, the closer its colour moves to the sky's, so distance reads as depth.
+
+## How it fits into Three.js
+
+**`ShaderMaterial`** takes your two shaders as strings, plus an object of uniforms:
+
+```javascript
+const uniforms = {
+  uTime: { value: 0 },
+  uHeight: { value: 3 },
+  uOctaves: { value: 5 },
+  // ...
+};
+
+const material = new THREE.ShaderMaterial({ vertexShader, fragmentShader, uniforms });
+
+// Each frame, or when a slider moves
+uniforms.uTime.value += dt;
+```
+
+`ShaderMaterial` adds some definitions before your code for you, including the `position` attribute, the camera matrices and `cameraPosition`. That's why the shaders above can use them without declaring them. `RawShaderMaterial` adds nothing, so you declare everything yourself.
+
+The terrain and water materials share the same `uniforms` object, so moving a slider updates both shaders at once.
+
+A few details are easy to trip over:
+
+- **Frustum culling.** Three.js skips drawing objects outside the camera's view, judged from a bounding sphere around the geometry. Here the geometry is flat, and the hills only exist inside the shader, so the sphere is wrong. The demo sets `frustumCulled = false` on the terrain.
+- **Colour.** A `ShaderMaterial` writes your colours straight to the screen, unless you include three.js's colour space chunk. The demo writes colours as they should appear, and passes the fog colour through unconverted so that it matches the background.
+- **Wireframe.** At 256 × 256, wireframe lines sit about two pixels apart and merge into a solid sheet. The wireframe steps draw a coarser 64 × 64 grid with the same shader.
+
+## Performance
+
+The terrain's vertex shader calls `heightAt()` three times per vertex, once for the vertex and twice more for the normal. With 66,049 vertices and 8 octaves, that's about 1.6 million noise samples per frame. The water's fragment shader calls `heightAt()` once per pixel the water covers. A modern GPU handles this comfortably, and it's all recalculated every frame, which is why the sliders respond instantly.
+
+A real game or map would usually work differently:
+
+- **Calculate once, not every frame.** Render the height into a texture once, and look it up each frame instead of recalculating the noise.
+- **Normals per pixel.** Normals calculated per vertex are smoothed across each triangle. Calculating them in the fragment shader gives sharper detail, at the cost of more noise samples per pixel.
+- **Level of detail.** Nearby ground needs a fine grid, and the distance doesn't. Large terrains split the map into tiles at different resolutions.
+
+The animation loop only runs while the demo is on screen. If your system asks for reduced motion, the waves and ripples start paused.
+
+## Related
+
+- [Flocking Algorithm (Boids)](/experiments/flocking-algorithm)
+- [Three.js: Force-Directed Node Graph](/experiments/threejs-node-graph)
+- [Retries, Backoff and Circuit Breakers, Visualised in Three.js](/experiments/integration-pipeline-particle-flow)

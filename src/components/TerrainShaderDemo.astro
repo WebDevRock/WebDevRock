@@ -1,0 +1,575 @@
+---
+// Custom shaders from first principles: a terrain built up in seven steps. The GLSL shown under the
+// canvas is exactly what is compiled for the current step, with the lines new in that step highlighted.
+import '../styles/tools.css';
+---
+
+<div class="terrain-demo" data-pagefind-ignore>
+  <div class="tr-stage" data-tr="stage">
+    <canvas data-tr="canvas" role="img" aria-label="A 3D landscape drawn by the shaders for the current step."></canvas>
+    <p class="tr-badge" data-tr="badge"></p>
+    <p class="tr-hint" data-tr="hint" hidden>Drag to rotate</p>
+  </div>
+
+  <div class="tool tr-panel">
+    <div class="tr-steps" role="group" aria-label="Step">
+      <button type="button" data-step="1" aria-pressed="true">1</button>
+      <button type="button" data-step="2" aria-pressed="false">2</button>
+      <button type="button" data-step="3" aria-pressed="false">3</button>
+      <button type="button" data-step="4" aria-pressed="false">4</button>
+      <button type="button" data-step="5" aria-pressed="false">5</button>
+      <button type="button" data-step="6" aria-pressed="false">6</button>
+      <button type="button" data-step="7" aria-pressed="false">7</button>
+      <span class="tr-step-nav">
+        <button type="button" data-action="prev">Previous</button>
+        <button type="button" class="primary" data-action="next">Next step</button>
+      </span>
+    </div>
+
+    <div aria-live="polite">
+      <h3 class="tr-title" data-tr="title"></h3>
+      <p class="tr-text" data-tr="text"></p>
+    </div>
+
+    <div class="tr-controls">
+      <label data-control="height">
+        <span class="tr-label-row">Height <output data-out="height"></output></span>
+        <input type="range" data-field="height" min="0.5" max="6" step="0.1" value="3" />
+      </label>
+      <label data-control="scale">
+        <span class="tr-label-row">Feature size <output data-out="scale"></output></span>
+        <input type="range" data-field="scale" min="1" max="8" step="0.25" value="3" />
+      </label>
+      <label data-control="octaves">
+        <span class="tr-label-row">Octaves <output data-out="octaves"></output></span>
+        <input type="range" data-field="octaves" min="1" max="8" step="1" value="5" />
+      </label>
+      <label data-control="sea">
+        <span class="tr-label-row">Sea level <output data-out="sea"></output></span>
+        <input type="range" data-field="sea" min="0" max="0.5" step="0.01" value="0.18" />
+      </label>
+      <label data-control="sun">
+        <span class="tr-label-row">Sun direction <output data-out="sun"></output></span>
+        <input type="range" data-field="sun" min="0" max="355" step="5" value="135" />
+      </label>
+      <div class="tr-seed" data-control="seed">
+        <label>
+          <span class="tr-label-row">Seed</span>
+          <input type="number" data-field="seed" min="1" max="9999" step="1" value="7" />
+        </label>
+        <button type="button" data-action="random">New landscape</button>
+      </div>
+    </div>
+
+    <div class="tr-toggles">
+      <label class="tr-check"><input type="checkbox" data-field="wireframe" /> Wireframe</label>
+      <label class="tr-check" data-control="animate"><input type="checkbox" data-field="animate" /> Animate</label>
+    </div>
+  </div>
+
+  <section class="tr-code" aria-labelledby="tr-code-title">
+    <div class="tr-code-head">
+      <h3 id="tr-code-title">The shaders for this step</h3>
+      <div class="tr-tabs" role="tablist" aria-label="Shader">
+        <button type="button" role="tab" data-tab="vertex" aria-selected="true">Vertex shader</button>
+        <button type="button" role="tab" data-tab="fragment" aria-selected="false">Fragment shader</button>
+        <button type="button" role="tab" data-tab="water" aria-selected="false" hidden>Water shader</button>
+      </div>
+    </div>
+    <p class="tr-code-note" data-tr="code-note"></p>
+    <pre class="tr-pre" role="tabpanel" tabindex="0"><code data-tr="code"></code></pre>
+  </section>
+</div>
+
+<script>
+  import * as THREE from 'three';
+  import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+  import { trackExperiment } from '../scripts/analytics';
+  import { STEPS, terrainVertex, terrainFragment, WATER_VERTEX, WATER_FRAGMENT, type Step } from '../scripts/terrain/shaders';
+
+  const DARK = 0x1e2528;
+  const SKY = 0xb8cad3;
+  const SIZE = 20;
+  const SEGMENTS = 256;
+  const WIRE_SEGMENTS = 64;
+
+  const root = document.querySelector<HTMLElement>('.terrain-demo');
+  if (root) init(root);
+
+  function init(root: HTMLElement) {
+    const q = <T extends HTMLElement>(sel: string) => root.querySelector<T>(sel)!;
+    const stage = q<HTMLElement>('[data-tr="stage"]');
+    const canvas = q<HTMLCanvasElement>('[data-tr="canvas"]');
+    const field = <T extends HTMLInputElement>(name: string) => q<T>(`[data-field="${name}"]`);
+    const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+    // ---------- Scene ----------
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(42, 1, 0.1, 200);
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setClearColor(DARK);
+
+    const target = new THREE.Vector3(0, 0.3, 0);
+    camera.position.set(17, 13, 17);
+    camera.lookAt(target);
+
+    let controls: OrbitControls | null = null;
+    if (window.matchMedia('(pointer: fine)').matches) {
+      controls = new OrbitControls(camera, canvas);
+      controls.target.copy(target);
+      controls.enableZoom = false; // keep the mouse wheel for scrolling the page
+      controls.enablePan = false;
+      controls.enableDamping = true;
+      controls.minPolarAngle = 0.25;
+      controls.maxPolarAngle = 1.4;
+      q<HTMLElement>('[data-tr="hint"]').hidden = false;
+    }
+
+    // Shader colours are written straight to the screen, so give the fog the sky's colour as-is
+    const fogColour = new THREE.Color().setHex(SKY, THREE.LinearSRGBColorSpace);
+
+    // One set of uniforms shared by both materials: change a value once and every shader sees it
+    const uniforms = {
+      uTime: { value: 0 },
+      uHeight: { value: 3 },
+      uScale: { value: 3 },
+      uSeed: { value: new THREE.Vector2() },
+      uOctaves: { value: 5 },
+      uSea: { value: 0.18 },
+      uSunDir: { value: new THREE.Vector3() },
+      uFogColor: { value: fogColour },
+      uFogNear: { value: 26 },
+      uFogFar: { value: 58 },
+    };
+
+    // The solid surface uses a fine grid. Wireframe uses a coarser one, because 256 lines across a few
+    // hundred pixels merge into a solid sheet.
+    const makeGrid = (segments: number) => {
+      const g = new THREE.PlaneGeometry(SIZE, SIZE, segments, segments);
+      g.rotateX(-Math.PI / 2); // lie flat: x and z across the ground, y up
+      return g;
+    };
+    const fineGrid = makeGrid(SEGMENTS);
+    const wireGrid = makeGrid(WIRE_SEGMENTS);
+    let terrainMat = new THREE.ShaderMaterial();
+    const terrain = new THREE.Mesh(fineGrid, terrainMat);
+
+    function setWireframe(on: boolean) {
+      terrainMat.wireframe = on;
+      terrain.geometry = on ? wireGrid : fineGrid;
+    }
+    terrain.frustumCulled = false; // the shader moves vertices, so the flat geometry's bounding sphere is wrong
+    scene.add(terrain);
+
+    const waterGeo = new THREE.PlaneGeometry(SIZE, SIZE);
+    waterGeo.rotateX(-Math.PI / 2);
+    const water = new THREE.Mesh(
+      waterGeo,
+      new THREE.ShaderMaterial({ vertexShader: WATER_VERTEX, fragmentShader: WATER_FRAGMENT, uniforms, transparent: true })
+    );
+    water.visible = false;
+    scene.add(water);
+
+    // ---------- Steps ----------
+    let step: Step = STEPS[0];
+    type Tab = 'vertex' | 'fragment' | 'water';
+    let tab: Tab = 'vertex';
+
+    const sources = (s: Step): Record<Tab, string> => ({
+      vertex: terrainVertex(s),
+      fragment: terrainFragment(s),
+      water: s.water ? WATER_FRAGMENT : '',
+    });
+
+    function showStep(id: number, via: string) {
+      step = STEPS.find((s) => s.id === id)!;
+      const src = sources(step);
+      const old = terrainMat;
+      terrainMat = new THREE.ShaderMaterial({ vertexShader: src.vertex, fragmentShader: src.fragment, uniforms });
+      terrain.material = terrainMat;
+      old.dispose();
+      setWireframe(step.wireframe);
+
+      water.visible = step.water;
+      renderer.setClearColor(step.water ? SKY : DARK);
+      field('wireframe').checked = step.wireframe;
+
+      root.querySelectorAll<HTMLButtonElement>('[data-step]').forEach((b) => b.setAttribute('aria-pressed', String(Number(b.dataset.step) === id)));
+      q<HTMLButtonElement>('[data-action="prev"]').disabled = id === 1;
+      q<HTMLButtonElement>('[data-action="next"]').disabled = id === STEPS.length;
+      q('[data-tr="title"]').textContent = `Step ${id}: ${step.title}`;
+      q('[data-tr="text"]').textContent = step.text;
+      q('[data-tr="badge"]').textContent = `Step ${id} of ${STEPS.length} · ${step.title}`;
+      canvas.setAttribute('aria-label', `3D view for step ${id}, ${step.title}. ${step.text}`);
+
+      root.querySelectorAll<HTMLElement>('[data-control]').forEach((el) => {
+        el.hidden = !step.controls.includes(el.dataset.control!);
+      });
+
+      const waterTab = q<HTMLButtonElement>('[data-tab="water"]');
+      waterTab.hidden = !step.water;
+      if (tab === 'water' && !step.water) tab = 'vertex';
+      renderCode();
+      if (via !== 'init') trackExperiment('terrain-shader', `step:${id}:${via}`);
+    }
+
+    // Show the shader source line by line, highlighting lines that weren't in the previous step
+    function renderCode() {
+      root.querySelectorAll<HTMLButtonElement>('[data-tab]').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.tab === tab)));
+      const current = sources(step)[tab];
+      const prevStep = STEPS.find((s) => s.id === step.id - 1);
+      const before = new Set(
+        prevStep && !(tab === 'water' && !prevStep.water)
+          ? sources(prevStep)
+              [tab].split('\n')
+              .map((l) => l.trim())
+          : []
+      );
+      const first = step.id === 1 || (tab === 'water' && step.water && !prevStep?.water);
+      let added = 0;
+      const code = q('[data-tr="code"]');
+      code.replaceChildren(
+        ...current.split('\n').map((line) => {
+          const span = document.createElement('span');
+          span.className = 'tr-line';
+          const isNew = !first && line.trim() !== '' && !before.has(line.trim());
+          if (isNew) {
+            span.classList.add('tr-new');
+            added++;
+          }
+          span.textContent = `${line}\n`;
+          return span;
+        })
+      );
+      const lines = current.split('\n').length;
+      q('[data-tr="code-note"]').textContent = first
+        ? `${lines} lines. This is the first step for this shader, so every line is new.`
+        : added
+          ? `${lines} lines. The ${added} highlighted line${added === 1 ? ' is' : 's are'} new in this step.`
+          : `${lines} lines. This shader hasn’t changed since the previous step.`;
+    }
+
+    root.querySelectorAll<HTMLButtonElement>('[data-step]').forEach((b) => b.addEventListener('click', () => showStep(Number(b.dataset.step), 'button')));
+    q('[data-action="prev"]').addEventListener('click', () => showStep(Math.max(1, step.id - 1), 'prev'));
+    q('[data-action="next"]').addEventListener('click', () => showStep(Math.min(STEPS.length, step.id + 1), 'next'));
+    root.querySelectorAll<HTMLButtonElement>('[data-tab]').forEach((b) =>
+      b.addEventListener('click', () => {
+        tab = b.dataset.tab as Tab;
+        renderCode();
+      })
+    );
+
+    // ---------- Controls ----------
+    function readControls() {
+      const num = (name: string) => Number(field(name).value);
+      uniforms.uHeight.value = num('height');
+      uniforms.uScale.value = num('scale');
+      uniforms.uOctaves.value = num('octaves');
+      uniforms.uSea.value = num('sea');
+      const seed = Math.max(1, Math.round(num('seed')) || 1);
+      // Turn the seed into a far-off starting point in the noise, so each seed is a different landscape
+      uniforms.uSeed.value.set(((seed * 12.9898) % 97) + 3, ((seed * 78.233) % 89) + 3);
+      const sun = THREE.MathUtils.degToRad(num('sun'));
+      const elevation = THREE.MathUtils.degToRad(35);
+      uniforms.uSunDir.value.set(Math.cos(sun) * Math.cos(elevation), Math.sin(elevation), Math.sin(sun) * Math.cos(elevation)).normalize();
+      water.position.y = uniforms.uSea.value * uniforms.uHeight.value;
+
+      q('[data-out="height"]').textContent = num('height').toFixed(1);
+      q('[data-out="scale"]').textContent = num('scale').toFixed(2);
+      q('[data-out="octaves"]').textContent = String(num('octaves'));
+      q('[data-out="sea"]').textContent = `${Math.round(num('sea') * 100)}%`;
+      q('[data-out="sun"]').textContent = `${num('sun')}°`;
+    }
+
+    root.querySelectorAll<HTMLInputElement>('.tr-controls input').forEach((el) => el.addEventListener('input', readControls));
+    root.querySelectorAll<HTMLInputElement>('.tr-controls input').forEach((el) =>
+      el.addEventListener('change', () => trackExperiment('terrain-shader', `control:${el.dataset.field}`))
+    );
+
+    q('[data-action="random"]').addEventListener('click', () => {
+      field('seed').value = String(1 + Math.floor(Math.random() * 9999));
+      readControls();
+      trackExperiment('terrain-shader', 'random');
+    });
+
+    field('wireframe').addEventListener('change', () => setWireframe(field('wireframe').checked));
+
+    const animate = field('animate');
+    animate.checked = !reducedMotion;
+
+    // ---------- Render loop ----------
+    function fit() {
+      const w = stage.clientWidth;
+      const h = stage.clientHeight;
+      if (!w || !h) return;
+      camera.aspect = w / h;
+      // Pull the camera back on narrow screens so the whole square stays in view
+      const dist = 34 / Math.min(1, camera.aspect * 0.95);
+      const dir = camera.position.clone().sub(target).normalize();
+      camera.position.copy(target).addScaledVector(dir, dist);
+      camera.updateProjectionMatrix();
+      renderer.setSize(w, h, false);
+    }
+    new ResizeObserver(fit).observe(stage);
+
+    let last = performance.now();
+    function frame(t: number) {
+      const dt = Math.min(0.1, (t - last) / 1000);
+      last = t;
+      const moving = animate.checked && step.controls.includes('animate');
+      if (moving) uniforms.uTime.value += dt;
+      controls?.update();
+      renderer.render(scene, camera);
+    }
+
+    new IntersectionObserver(([entry]) => {
+      if (entry.isIntersecting) {
+        last = performance.now();
+        renderer.setAnimationLoop(frame);
+      } else {
+        renderer.setAnimationLoop(null);
+      }
+    }).observe(stage);
+
+    readControls();
+    fit();
+    showStep(1, 'init');
+  }
+</script>
+
+<style is:global>
+  .terrain-demo {
+    margin: 2rem 0;
+  }
+
+  .tr-stage {
+    position: relative;
+    aspect-ratio: 16 / 10;
+    overflow: hidden;
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-lg);
+    background: var(--surface-inverse);
+  }
+
+  .tr-stage canvas {
+    display: block;
+    width: 100%;
+    height: 100%;
+  }
+
+  .tr-badge,
+  .tr-hint {
+    position: absolute;
+    margin: 0;
+    padding: 4px 9px;
+    border-radius: var(--radius-sm);
+    background: rgba(30, 37, 40, 0.8);
+    color: var(--syn-text);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    pointer-events: none;
+  }
+
+  .tr-badge {
+    top: 10px;
+    left: 12px;
+  }
+
+  .tr-hint {
+    right: 12px;
+    bottom: 10px;
+    color: var(--syn-muted);
+    font-size: 11px;
+  }
+
+  .tr-panel {
+    margin-top: 12px;
+  }
+
+  .tr-steps {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .terrain-demo .tool .tr-steps [data-step] {
+    min-width: 40px;
+    padding: 6px 0;
+    font-family: var(--font-mono);
+  }
+
+  .terrain-demo .tool .tr-steps [data-step][aria-pressed='true'] {
+    border-color: var(--accent);
+    background: var(--accent);
+    color: var(--accent-on);
+  }
+
+  .tr-step-nav {
+    display: flex;
+    gap: 6px;
+    margin-left: auto;
+  }
+
+  .terrain-demo .tool button:disabled {
+    cursor: default;
+    opacity: 0.45;
+  }
+
+  .terrain-demo .tr-title {
+    margin: 4px 0 4px;
+    font-size: 18px;
+  }
+
+  .terrain-demo .tr-text {
+    margin: 0;
+    color: var(--text-body);
+    font-size: 15px;
+  }
+
+  .tr-controls {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+    gap: 12px 16px;
+  }
+
+  .terrain-demo [data-control][hidden] {
+    display: none;
+  }
+
+  .tr-label-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  .tr-label-row output {
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    font-weight: 400;
+  }
+
+  .terrain-demo input[type='range'] {
+    width: 100%;
+    accent-color: var(--accent);
+  }
+
+  .tr-seed {
+    display: flex;
+    align-items: flex-end;
+    gap: 8px;
+  }
+
+  .tr-seed label {
+    flex: 1;
+  }
+
+  .tr-toggles {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 18px;
+  }
+
+  .terrain-demo .tool label.tr-check {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .tr-check input {
+    accent-color: var(--accent);
+  }
+
+  .tr-code {
+    margin-top: 12px;
+    padding: 16px 20px;
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-lg);
+    background: var(--surface-card);
+  }
+
+  .tr-code-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  .terrain-demo .tr-code h3 {
+    margin: 0;
+    font-size: 16px;
+  }
+
+  .tr-tabs {
+    display: flex;
+    gap: 4px;
+  }
+
+  .tr-tabs button {
+    padding: 5px 10px;
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-md);
+    background: var(--surface-raised);
+    color: var(--text-strong);
+    font: inherit;
+    font-size: 13px;
+    cursor: pointer;
+  }
+
+  .tr-tabs button[aria-selected='true'] {
+    border-color: var(--accent);
+    background: var(--accent-tint);
+  }
+
+  .tr-tabs button[hidden] {
+    display: none;
+  }
+
+  .terrain-demo .tr-code-note {
+    margin: 8px 0;
+    color: var(--text-muted);
+    font-size: var(--fs-small);
+  }
+
+  .terrain-demo .tr-pre {
+    max-height: 26rem;
+    margin: 0;
+    padding: 12px 0;
+    overflow: auto;
+    border-radius: var(--radius-md);
+    background: var(--surface-code);
+    color: var(--syn-text);
+    font-family: var(--font-mono);
+    font-size: 13px;
+    line-height: 1.55;
+  }
+
+  .tr-line {
+    display: block;
+    padding: 0 14px;
+    white-space: pre;
+  }
+
+  .tr-new {
+    background: rgba(143, 203, 190, 0.16);
+    box-shadow: inset 3px 0 0 #8fcbbe;
+  }
+
+  @media (max-width: 640px) {
+    .tr-stage {
+      aspect-ratio: auto;
+      height: 340px;
+    }
+
+    .tr-step-nav {
+      width: 100%;
+      margin-left: 0;
+    }
+
+    .tr-step-nav button {
+      flex: 1;
+    }
+  }
+</style>
