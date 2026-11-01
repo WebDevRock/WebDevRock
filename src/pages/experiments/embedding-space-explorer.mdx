@@ -1,0 +1,93 @@
+---
+layout: ../../layouts/ContentLayout.astro
+title: "Embeddings Explained: Explore How AI Represents Meaning in 3D"
+description: "An interactive 3D map of about 200 phrases embedded with a real model. See why similar meanings sit together, how semantic search finds answers without shared words, and where it goes wrong."
+tags: [threejs, visualization, ai, embeddings]
+updated: "2026-11-01"
+---
+
+import EmbeddingExplorer from '../../components/EmbeddingExplorer.astro';
+
+## Overview
+
+An **embedding** turns a piece of text into a list of numbers, chosen so that texts with similar meanings get similar numbers. "My parcel hasn't arrived" and "My package is stuck in transit" share no words, but their numbers are close. That's what lets a search box, a help-desk chatbot or a recommendation system work with what text *means* rather than the exact words it uses.
+
+The phrases in this demo come mostly from an online shop's help desk, with a few unrelated topics for contrast. Each phrase was turned into 384 numbers by a real embedding model, then laid out in 3D so that phrases with close numbers sit close together. A few phrases are traps: *Python* the language and the snake, a *river bank* and a *bank* holding money, *Apple* the company and an *apple* a day.
+
+## Demo
+
+<EmbeddingExplorer />
+
+Select any dot, or choose a phrase from the list, to see its nearest neighbours and its 384 numbers. **Search like a help-desk bot** asks questions that aren't in the data and shows what comes back.
+
+## What to try
+
+### Same meaning, different words
+
+Start with **My parcel hasn't arrived**. Its nearest neighbours include "My package is stuck in transit" and "My order says delivered but I haven't got it", which share no words with it. A keyword search would never connect them. The numbers do, because the model learned from a very large amount of text that these phrases are used in similar situations.
+
+### Search without matching words
+
+In **Search like a help-desk bot**, choose **Where's my stuff?** A keyword search for "stuff" finds nothing: no phrase contains the word. Ranking by meaning puts "Where is my order?" first. This is the retrieval step in what's often called retrieval-augmented generation (RAG). A chatbot embeds your question, finds the stored help articles with the closest numbers, and hands them to a language model to write its reply.
+
+### Where it goes wrong
+
+Embeddings are good, but they're not magic, and the demo doesn't hide the misses:
+
+- **Did we win on Saturday?** finds the two football results first, but third is "We're having a barbecue on Saturday". The shared word "Saturday" pulls it in.
+- **Python is my favourite programming language** has "A python swallowed a whole rabbit" among its nearest neighbours, for the same reason. Use **Compare with** to see the similarity: 0.30, loosely related.
+- **We had a picnic on the river bank** has "I deposited money at the bank this morning" among its neighbours.
+
+This model is small by today's standards: the file the script used is about 90 MB, and it runs comfortably on a laptop. Larger models usually separate these meanings better, but every model makes mistakes like this sometimes. That's one reason real systems often combine semantic search with keyword search, and check the results.
+
+## How similarity is measured
+
+Each phrase becomes a vector, a list of 384 numbers. The strip under the selected phrase draws them: bars above the line for positive numbers, below for negative. No single number means anything on its own, such as "about deliveries". The meaning is spread across all 384.
+
+Two phrases are compared by **cosine similarity**: how closely their vectors point in the same direction. It runs from −1 (opposite) through 0 (unrelated) to 1 (identical):
+
+```javascript
+function cosineSimilarity(a, b) {
+  let dot = 0, lenA = 0, lenB = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+    lenA += a[i] * a[i];
+    lenB += b[i] * b[i];
+  }
+  return dot / Math.sqrt(lenA * lenB);
+}
+```
+
+The demo labels similarities above 0.7 as very close, 0.5 to 0.7 as clearly related, and 0.3 to 0.5 as loosely related. Those are rough guides for this model. Different models produce different ranges, so the thresholds don't carry over.
+
+Searching is just this comparison repeated: work out the question's similarity to every phrase and sort. With 200 phrases, that's instant. With millions of documents, a **vector database** uses an index to find the nearest vectors without comparing against every one.
+
+## Squeezing 384 dimensions into 3
+
+The 3D picture is a **projection**, and every projection loses something. Nearest neighbours in the panel are always measured on the full 384 numbers, never on the 3D positions. When the two disagree a lot, the list says so, for example "looks far away in 3D (38th nearest dot)".
+
+The layout uses **UMAP**, which tries to keep each phrase next to the phrases that are its nearest neighbours in the full space. I measured how often a phrase's five nearest neighbours share its topic:
+
+| Measured on | Share of the five nearest in the same topic |
+| --- | --- |
+| The full 384 numbers | 75% |
+| UMAP's 3D layout | 82% |
+| A simpler projection, PCA, in 3D | 58% |
+
+UMAP scores *higher* than the original vectors, which sounds impossible but isn't. UMAP pulls clusters apart to make them easier to see, so topics look tidier in 3D than they really are. The flip side is that the gaps *between* clusters don't mean much: two topics sitting far apart in the picture aren't necessarily more different than two that sit close. PCA keeps distances more honestly, but its three best directions hold under 15% of the variation in the data, so the topics blur together.
+
+## How the data was made
+
+The phrases and questions are embedded once, ahead of time, by a script in the site's repository. Nothing is sent to a model while you use the page.
+
+- **The model** is [all-MiniLM-L6-v2](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2), an open-source model under the Apache 2.0 licence. It maps text to 384 numbers and was trained on over a billion sentence pairs for tasks like semantic search and clustering. The script runs it with Transformers.js, averaging the model's output for each word piece into one vector per phrase, then scaling it to length 1.
+- **The 3D layout** comes from UMAP with 15 neighbours, run with a fixed random seed so the layout is the same every time. The search questions are placed using the fitted layout, so they land among the phrases they resemble.
+- **Storage.** 32-bit numbers would make the file about four times larger, so each vector is stored as 384 whole numbers from −127 to 127, plus one scale factor. Rounding barely changes a vector's direction. Across every pair of phrases, the largest change in cosine similarity is 0.003. The whole data file is about 130 KB.
+
+In the page, Three.js draws all the phrases with one `InstancedMesh`, a single sphere shape drawn about 200 times with a different position and colour each time. Picking uses a raycaster against the instances, and the lines to the nearest neighbours are a single `LineSegments` object.
+
+## Related
+
+- [What Are AI Agents?](/ai/what-are-ai-agents)
+- [Building an Agent System](/ai/building-agent-system)
+- [How a Database Index Works: A B-Tree in 3D](/experiments/database-index-btree)

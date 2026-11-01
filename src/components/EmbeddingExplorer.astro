@@ -1,0 +1,835 @@
+---
+// Embedding space explorer: about 200 phrases, embedded with all-MiniLM-L6-v2 (384 numbers each) and
+// laid out in 3D with UMAP. Nearest neighbours and search use the full 384-number vectors, not the 3D
+// positions. The data comes from scripts/embeddings/generate.mjs.
+import '../styles/tools.css';
+---
+
+<div class="emb-demo" data-pagefind-ignore>
+  <div class="emb-stage" data-emb="stage">
+    <canvas
+      data-emb="canvas"
+      role="img"
+      aria-label="A 3D cloud of about 200 phrases, coloured by topic. Phrases with similar meanings sit close together. The panels below the demo list the same information as text."
+    ></canvas>
+    <div class="emb-view" aria-label="View">
+      <button type="button" data-view="in" aria-label="Zoom in">+</button>
+      <button type="button" data-view="out" aria-label="Zoom out">−</button>
+      <button type="button" data-view="spin" aria-pressed="true">Spin</button>
+    </div>
+    <p class="emb-hint" data-emb="hint">Select a dot to see its nearest phrases</p>
+  </div>
+
+  <div class="emb-legend" role="group" aria-label="Topics to show" data-emb="legend"></div>
+
+  <div class="tool emb-panel">
+    <div class="emb-modes" role="tablist" aria-label="Mode">
+      <button type="button" role="tab" data-mode="explore" aria-selected="true">Explore a phrase</button>
+      <button type="button" role="tab" data-mode="search" aria-selected="false">Search like a help-desk bot</button>
+    </div>
+
+    <div data-panel="explore">
+      <label>
+        Phrase
+        <select data-emb="phrase"></select>
+      </label>
+      <div class="emb-selected" data-emb="selected"></div>
+      <h3 class="emb-h">Nearest in meaning</h3>
+      <ol class="emb-list" data-emb="neighbours"></ol>
+      <label class="emb-compare">
+        Compare with
+        <select data-emb="compare"></select>
+      </label>
+      <p class="emb-compare-result" data-emb="compare-result" aria-live="polite"></p>
+    </div>
+
+    <div data-panel="search" hidden>
+      <p class="emb-note">
+        A help-desk chatbot often starts by finding the most relevant help articles for a question, then gives them to a language model to write the
+        answer. The finding is done like this: embed the question, then rank every stored phrase by how similar its numbers are. None of these questions
+        appear among the phrases.
+      </p>
+      <div class="emb-queries" data-emb="queries"></div>
+      <div data-emb="search-results" aria-live="polite"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+  import * as THREE from 'three';
+  import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+  import { CSS2DRenderer, CSS2DObject } from 'three/examples/jsm/renderers/CSS2DRenderer.js';
+  import { trackExperiment } from '../scripts/analytics';
+  import data from '../data/embeddings.json';
+
+  interface Item {
+    text: string;
+    category: string | null;
+    query: boolean;
+    position: number[];
+    scale: number;
+  }
+
+  const COLOURS: Record<string, number> = {
+    account: 0x8fcbbe,
+    delivery: 0xe2bd73,
+    payment: 0x9ed39a,
+    errors: 0xe8846f,
+    code: 0x7fb2ea,
+    weather: 0x5fd0e0,
+    food: 0xee9fc5,
+    animals: 0xc9b4dc,
+    sport: 0xd9d27a,
+  };
+  const hex = (n: number) => `#${n.toString(16).padStart(6, '0')}`;
+
+  // Small words that say little about meaning, ignored when looking for shared words
+  const STOP = new Set(
+    'a an the i i’m im my me we our you your it its it’s is are was were be been am do does did to of in on at for from by with and or but not no this that these those there here what where when how why which who can could will would should has have had get got just so too very as if than then into out up about over any some'.split(
+      ' '
+    )
+  );
+  const words = (s: string) =>
+    new Set(
+      s
+        .toLowerCase()
+        .replace(/[’']/g, '’')
+        .split(/[^a-z0-9’-]+/)
+        .map((w) => w.replace(/’s$/, ''))
+        .filter((w) => w && !STOP.has(w))
+    );
+
+  const root = document.querySelector<HTMLElement>('.emb-demo');
+  if (root) init(root);
+
+  function init(root: HTMLElement) {
+    const q = <T extends HTMLElement>(sel: string) => root.querySelector<T>(sel)!;
+    const stage = q<HTMLElement>('[data-emb="stage"]');
+    const canvas = q<HTMLCanvasElement>('[data-emb="canvas"]');
+    const items = data.items as Item[];
+    const dims = data.dims;
+    const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+    // ---------- Vectors: 8-bit whole numbers, decoded once ----------
+    const bytes = Uint8Array.from(atob(data.vectors), (c) => c.charCodeAt(0));
+    const ints = new Int8Array(bytes.buffer);
+    const norms = items.map((_, i) => {
+      let s = 0;
+      for (let d = 0; d < dims; d++) s += ints[i * dims + d] ** 2;
+      return Math.sqrt(s);
+    });
+    // Cosine similarity: how closely two vectors point the same way, from -1 to 1
+    const similarity = (a: number, b: number) => {
+      let s = 0;
+      for (let d = 0; d < dims; d++) s += ints[a * dims + d] * ints[b * dims + d];
+      return s / (norms[a] * norms[b]);
+    };
+
+    const phraseIds = items.map((it, i) => (it.query ? -1 : i)).filter((i) => i >= 0);
+    const queryIds = items.map((it, i) => (it.query ? i : -1)).filter((i) => i >= 0);
+    const categoryName = (id: string | null) => data.categories.find((c) => c.id === id)?.name ?? 'Question';
+    const hidden = new Set<string>();
+
+    function ranked(from: number, k: number) {
+      return phraseIds
+        .filter((i) => i !== from && !hidden.has(items[i].category!))
+        .map((i) => ({ i, s: similarity(from, i) }))
+        .sort((a, b) => b.s - a.s)
+        .slice(0, k);
+    }
+
+    // ---------- Scene ----------
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 200);
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setClearColor(0x1e2528);
+    scene.add(new THREE.AmbientLight(0xffffff, 1.4));
+    const sun = new THREE.DirectionalLight(0xffffff, 2);
+    sun.position.set(5, 10, 8);
+    scene.add(sun);
+
+    const labelRenderer = new CSS2DRenderer();
+    labelRenderer.domElement.className = 'emb-labels';
+    stage.appendChild(labelRenderer.domElement);
+
+    let distance = 17;
+    camera.position.set(0, 4, distance);
+    let controls: OrbitControls | null = null;
+    if (window.matchMedia('(pointer: fine)').matches) {
+      controls = new OrbitControls(camera, canvas);
+      controls.enableZoom = false; // the + and − buttons zoom, so the wheel keeps scrolling the page
+      controls.enablePan = false;
+      controls.enableDamping = true;
+    }
+    let spinning = !reducedMotion;
+    const spinBtn = q<HTMLButtonElement>('[data-view="spin"]');
+    spinBtn.setAttribute('aria-pressed', String(spinning));
+
+    // One sphere per phrase, drawn with a single InstancedMesh
+    const dots = new THREE.InstancedMesh(new THREE.SphereGeometry(0.2, 14, 10), new THREE.MeshLambertMaterial(), items.length);
+    const matrix = new THREE.Matrix4();
+    const colour = new THREE.Color();
+    const sizes = items.map(() => 1);
+
+    function updateDots() {
+      items.forEach((it, i) => {
+        const visible = it.query ? i === activeQuery : !hidden.has(it.category!);
+        const s = visible ? sizes[i] : 0;
+        matrix.makeScale(s, s, s).setPosition(it.position[0], it.position[1], it.position[2]);
+        dots.setMatrixAt(i, matrix);
+        colour.setHex(it.query ? 0xffffff : COLOURS[it.category!]);
+        dots.setColorAt(i, colour);
+      });
+      dots.instanceMatrix.needsUpdate = true;
+      if (dots.instanceColor) dots.instanceColor.needsUpdate = true;
+    }
+    dots.frustumCulled = false; // instance sizes change, so the cached bounds would go stale
+    scene.add(dots);
+
+    // Lines from the selected phrase to its nearest neighbours
+    const lineGeo = new THREE.BufferGeometry();
+    lineGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(10 * 6), 3));
+    const lines = new THREE.LineSegments(lineGeo, new THREE.LineBasicMaterial({ color: 0xf4f1ea, transparent: true, opacity: 0.7 }));
+    lines.frustumCulled = false;
+    scene.add(lines);
+
+    // Labels for the selected phrase, its neighbours and whatever is under the pointer
+    const labels: CSS2DObject[] = [];
+    function clearLabels() {
+      labels.forEach((l) => {
+        l.element.remove();
+        scene.remove(l);
+      });
+      labels.length = 0;
+    }
+    const short = (s: string) => (s.length > 42 ? `${s.slice(0, 40)}…` : s);
+    function addLabel(i: number, cls: string) {
+      const el = document.createElement('div');
+      el.className = `emb-label ${cls}`;
+      el.textContent = short(items[i].text);
+      el.style.setProperty('--dot', hex(items[i].query ? 0xffffff : COLOURS[items[i].category!]));
+      const obj = new CSS2DObject(el);
+      obj.position.fromArray(items[i].position).add(new THREE.Vector3(0, 0.45, 0));
+      scene.add(obj);
+      labels.push(obj);
+    }
+    const hoverEl = document.createElement('div');
+    hoverEl.className = 'emb-label emb-label-hover';
+    const hoverLabel = new CSS2DObject(hoverEl);
+    hoverLabel.visible = false;
+    scene.add(hoverLabel);
+
+    function drawLines(from: number, to: number[]) {
+      const arr = lineGeo.attributes.position.array as Float32Array;
+      to.forEach((j, k) => arr.set([...items[from].position, ...items[j].position], k * 6));
+      lineGeo.setDrawRange(0, to.length * 2);
+      lineGeo.attributes.position.needsUpdate = true;
+    }
+
+    // ---------- Legend: topic filters ----------
+    const legend = q<HTMLElement>('[data-emb="legend"]');
+    for (const c of data.categories) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'emb-chip';
+      b.setAttribute('aria-pressed', 'true');
+      b.style.setProperty('--dot', hex(COLOURS[c.id]));
+      b.innerHTML = `<span></span>${c.name}`;
+      b.addEventListener('click', () => {
+        if (hidden.has(c.id)) hidden.delete(c.id);
+        else hidden.add(c.id);
+        b.setAttribute('aria-pressed', String(!hidden.has(c.id)));
+        refresh();
+        trackExperiment('embeddings', 'filter');
+      });
+      legend.append(b);
+    }
+
+    // ---------- Explore mode ----------
+    const phraseSelect = q<HTMLSelectElement>('[data-emb="phrase"]');
+    const compareSelect = q<HTMLSelectElement>('[data-emb="compare"]');
+    function fillSelect(select: HTMLSelectElement, blank?: string) {
+      const groups = data.categories.map((c) => {
+        const g = document.createElement('optgroup');
+        g.label = c.name;
+        for (const i of phraseIds.filter((i) => items[i].category === c.id)) {
+          const o = document.createElement('option');
+          o.value = String(i);
+          o.textContent = items[i].text;
+          g.append(o);
+        }
+        return g;
+      });
+      if (blank) {
+        const o = document.createElement('option');
+        o.value = '';
+        o.textContent = blank;
+        select.append(o);
+      }
+      select.append(...groups);
+    }
+    fillSelect(phraseSelect);
+    fillSelect(compareSelect, 'Choose a phrase…');
+
+    let mode: 'explore' | 'search' = 'explore';
+    let selected = phraseIds[0];
+    let activeQuery = -1;
+
+    function describe(s: number) {
+      if (s >= 0.7) return 'very close in meaning';
+      if (s >= 0.5) return 'clearly related';
+      if (s >= 0.3) return 'loosely related';
+      return 'not really related';
+    }
+    const pct = (s: number) => s.toFixed(2);
+    const ordinal = (n: number) => {
+      const teen = n % 100 >= 11 && n % 100 <= 13;
+      return `${n}${teen ? 'th' : ['th', 'st', 'nd', 'rd'][n % 10] ?? 'th'}`;
+    };
+
+    function sharedWords(a: number, b: number) {
+      const wa = words(items[a].text);
+      return [...words(items[b].text)].filter((w) => wa.has(w));
+    }
+
+    // Draw the phrase's 384 numbers as a strip: up for positive, down for negative
+    function vectorStrip(i: number) {
+      const c = document.createElement('canvas');
+      c.className = 'emb-strip';
+      c.width = dims * 2;
+      c.height = 60;
+      c.setAttribute('role', 'img');
+      c.setAttribute('aria-label', `The ${dims} numbers that represent this phrase, drawn as bars above and below a line.`);
+      const g = c.getContext('2d')!;
+      const max = Math.max(...Array.from({ length: dims }, (_, d) => Math.abs(ints[i * dims + d])));
+      for (let d = 0; d < dims; d++) {
+        const v = ints[i * dims + d] / max;
+        g.fillStyle = v >= 0 ? '#2f7a8a' : '#c0664f';
+        const h = Math.abs(v) * 28;
+        g.fillRect(d * 2, v >= 0 ? 30 - h : 30, 1.6, h);
+      }
+      return c;
+    }
+
+    function selectPhrase(i: number, via: string) {
+      selected = i;
+      phraseSelect.value = String(i);
+      const near = ranked(i, 6);
+      const box = q<HTMLElement>('[data-emb="selected"]');
+      box.replaceChildren();
+      const p = document.createElement('p');
+      p.className = 'emb-phrase';
+      p.style.setProperty('--dot', hex(COLOURS[items[i].category!]));
+      p.textContent = `“${items[i].text}”`;
+      const meta = document.createElement('p');
+      meta.className = 'emb-meta';
+      const first = Array.from({ length: 6 }, (_, d) => (ints[i * dims + d] * items[i].scale).toFixed(3)).join(', ');
+      meta.textContent = `${categoryName(items[i].category)} · ${dims} numbers, starting ${first}, …`;
+      box.append(p, meta, vectorStrip(i));
+
+      // Rank of each neighbour by 3D distance, to show when the 3D picture disagrees with the full vectors
+      const byDistance = phraseIds
+        .filter((j) => j !== i && !hidden.has(items[j].category!))
+        .map((j) => ({ j, d: new THREE.Vector3().fromArray(items[i].position).distanceTo(new THREE.Vector3().fromArray(items[j].position)) }))
+        .sort((a, b) => a.d - b.d)
+        .map((x) => x.j);
+
+      q<HTMLOListElement>('[data-emb="neighbours"]').replaceChildren(
+        ...near.map(({ i: j, s }) => {
+          const li = document.createElement('li');
+          const btn = document.createElement('button');
+          btn.type = 'button';
+          btn.className = 'emb-item';
+          btn.style.setProperty('--dot', hex(COLOURS[items[j].category!]));
+          btn.innerHTML = `<span class="emb-score">${pct(s)}</span>`;
+          btn.append(items[j].text);
+          btn.addEventListener('click', () => selectPhrase(j, 'neighbour'));
+          li.append(btn);
+          const notes: string[] = [];
+          if (items[j].category !== items[i].category) notes.push(`different topic: ${categoryName(items[j].category)}`);
+          const shared = sharedWords(i, j);
+          if (shared.length) notes.push(`shares “${shared.join('”, “')}”`);
+          else notes.push('no words in common');
+          const rank3d = byDistance.indexOf(j) + 1;
+          if (rank3d > 15) notes.push(`looks far away in 3D (${ordinal(rank3d)} nearest dot)`);
+          const small = document.createElement('small');
+          small.textContent = notes.join(' · ');
+          li.append(small);
+          return li;
+        })
+      );
+
+      clearLabels();
+      addLabel(i, 'emb-label-on');
+
+      drawLines(
+        i,
+        near.map((n) => n.i)
+      );
+      sizes.fill(1);
+      sizes[i] = 1.8;
+      near.forEach(({ i: j }) => (sizes[j] = 1.35));
+      updateDots();
+      updateCompare();
+      if (via !== 'auto') trackExperiment('embeddings', `select:${via}`);
+    }
+
+    function updateCompare() {
+      const out = q<HTMLElement>('[data-emb="compare-result"]');
+      const j = Number(compareSelect.value);
+      if (!compareSelect.value || j === selected) {
+        out.textContent = '';
+        return;
+      }
+      const s = similarity(selected, j);
+      const shared = sharedWords(selected, j);
+      out.textContent = `Similarity ${pct(s)}: ${describe(s)}. ${shared.length ? `They share the word${shared.length > 1 ? 's' : ''} “${shared.join('”, “')}”.` : 'They have no words in common.'}`;
+    }
+
+    phraseSelect.addEventListener('change', () => selectPhrase(Number(phraseSelect.value), 'list'));
+    compareSelect.addEventListener('change', () => {
+      updateCompare();
+      trackExperiment('embeddings', 'compare');
+    });
+
+    // ---------- Search mode ----------
+    const queriesEl = q<HTMLElement>('[data-emb="queries"]');
+    queriesEl.replaceChildren(
+      ...queryIds.map((i) => {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'small';
+        b.dataset.query = String(i);
+        b.setAttribute('aria-pressed', 'false');
+        b.textContent = items[i].text;
+        b.addEventListener('click', () => runSearch(i));
+        return b;
+      })
+    );
+
+    function runSearch(i: number) {
+      activeQuery = i;
+      queriesEl.querySelectorAll('button').forEach((b) => b.setAttribute('aria-pressed', String(Number(b.dataset.query) === i)));
+      const top = ranked(i, 5);
+      const qWords = words(items[i].text);
+      const keywordHits = phraseIds.filter((j) => !hidden.has(items[j].category!) && [...words(items[j].text)].some((w) => qWords.has(w)));
+
+      const out = q<HTMLElement>('[data-emb="search-results"]');
+      out.replaceChildren();
+      const h = document.createElement('h3');
+      h.className = 'emb-h';
+      h.textContent = `Best matches for “${items[i].text}”`;
+      const ol = document.createElement('ol');
+      ol.className = 'emb-list';
+      for (const { i: j, s } of top) {
+        const li = document.createElement('li');
+        const row = document.createElement('div');
+        row.className = 'emb-item emb-item-static';
+        row.style.setProperty('--dot', hex(COLOURS[items[j].category!]));
+        row.innerHTML = `<span class="emb-score">${pct(s)}</span>`;
+        row.append(items[j].text);
+        const small = document.createElement('small');
+        const shared = sharedWords(i, j);
+        small.textContent = `${categoryName(items[j].category)} · ${shared.length ? `shares “${shared.join('”, “')}”` : 'no words in common'}`;
+        li.append(row, small);
+        ol.append(li);
+      }
+      const kw = document.createElement('p');
+      kw.className = 'emb-note';
+      const matchedNoWords = top.filter(({ i: j }) => sharedWords(i, j).length === 0).length;
+      kw.textContent = `For comparison, a keyword search for “${[...qWords].join(' ')}” matches ${keywordHits.length} phrase${keywordHits.length === 1 ? '' : 's'}. ${
+        matchedNoWords
+          ? `${matchedNoWords} of the 5 best matches above ${matchedNoWords === 1 ? 'shares' : 'share'} no words with the question, so a keyword search couldn’t find ${matchedNoWords === 1 ? 'it' : 'them'}.`
+          : ''
+      }`;
+      out.append(h, ol, kw);
+
+      clearLabels();
+      addLabel(i, 'emb-label-query');
+      addLabel(top[0].i, '');
+      drawLines(
+        i,
+        top.map((t) => t.i)
+      );
+      sizes.fill(1);
+      sizes[i] = 2;
+      top.forEach(({ i: j }) => (sizes[j] = 1.35));
+      updateDots();
+      trackExperiment('embeddings', 'search');
+    }
+
+    // ---------- Modes ----------
+    root.querySelectorAll<HTMLButtonElement>('[data-mode]').forEach((b) =>
+      b.addEventListener('click', () => {
+        mode = b.dataset.mode as typeof mode;
+        root.querySelectorAll<HTMLButtonElement>('[data-mode]').forEach((x) => x.setAttribute('aria-selected', String(x === b)));
+        root.querySelectorAll<HTMLElement>('[data-panel]').forEach((p) => (p.hidden = p.dataset.panel !== mode));
+        refresh();
+      })
+    );
+
+    function refresh() {
+      if (mode === 'explore') {
+        activeQuery = -1;
+        if (hidden.has(items[selected].category!)) {
+          const next = phraseIds.find((i) => !hidden.has(items[i].category!));
+          if (next !== undefined) selected = next;
+        }
+        selectPhrase(selected, 'auto');
+      } else {
+        runSearch(activeQuery >= 0 ? activeQuery : queryIds[1]);
+      }
+    }
+
+    // ---------- Picking ----------
+    const raycaster = new THREE.Raycaster();
+    const pointer = new THREE.Vector2();
+    const pick = (e: PointerEvent) => {
+      const rect = canvas.getBoundingClientRect();
+      pointer.set(((e.clientX - rect.left) / rect.width) * 2 - 1, -((e.clientY - rect.top) / rect.height) * 2 + 1);
+      raycaster.setFromCamera(pointer, camera);
+      const hit = raycaster.intersectObject(dots).find((h) => h.instanceId !== undefined && !items[h.instanceId].query && !hidden.has(items[h.instanceId].category!));
+      return hit?.instanceId ?? -1;
+    };
+    let downAt: { x: number; y: number } | null = null;
+    canvas.addEventListener('pointerdown', (e) => {
+      downAt = { x: e.clientX, y: e.clientY };
+      spinning = false;
+      spinBtn.setAttribute('aria-pressed', 'false');
+    });
+    canvas.addEventListener('pointerup', (e) => {
+      if (!downAt || Math.hypot(e.clientX - downAt.x, e.clientY - downAt.y) > 6) return;
+      const i = pick(e);
+      if (i < 0) return;
+      if (mode === 'search') root.querySelector<HTMLButtonElement>('[data-mode="explore"]')!.click();
+      selectPhrase(i, 'dot');
+    });
+    canvas.addEventListener('pointermove', (e) => {
+      if (e.buttons) return;
+      const i = pick(e);
+      canvas.style.cursor = i >= 0 ? 'pointer' : '';
+      hoverLabel.visible = i >= 0;
+      if (i >= 0) {
+        hoverEl.textContent = short(items[i].text);
+        hoverEl.style.setProperty('--dot', hex(COLOURS[items[i].category!]));
+        hoverLabel.position.fromArray(items[i].position).add(new THREE.Vector3(0, 0.45, 0));
+      }
+    });
+    canvas.addEventListener('pointerleave', () => (hoverLabel.visible = false));
+
+    root.querySelectorAll<HTMLButtonElement>('[data-view]').forEach((b) =>
+      b.addEventListener('click', () => {
+        if (b.dataset.view === 'in') distance = Math.max(10, distance / 1.25);
+        else if (b.dataset.view === 'out') distance = Math.min(45, distance * 1.25);
+        else {
+          spinning = !spinning;
+          b.setAttribute('aria-pressed', String(spinning));
+        }
+      })
+    );
+
+    // ---------- Render loop ----------
+    const target = new THREE.Vector3();
+    function fit() {
+      const w = stage.clientWidth;
+      const h = stage.clientHeight;
+      if (!w || !h) return;
+      camera.aspect = w / h;
+      camera.updateProjectionMatrix();
+      renderer.setSize(w, h, false);
+      labelRenderer.setSize(w, h);
+    }
+    new ResizeObserver(fit).observe(stage);
+    fit();
+
+    let last = performance.now();
+    function frame(t: number) {
+      const dt = Math.min(0.1, (t - last) / 1000);
+      last = t;
+      const dir = camera.position.clone().sub(target);
+      if (spinning) dir.applyAxisAngle(new THREE.Vector3(0, 1, 0), dt * 0.12);
+      // Narrow screens need the camera further back to fit the cloud's width
+      const want = distance / Math.min(1, camera.aspect * 0.9);
+      dir.setLength(dir.length() + (want - dir.length()) * Math.min(1, dt * 5));
+      camera.position.copy(target).add(dir);
+      controls?.update();
+      camera.lookAt(target);
+      renderer.render(scene, camera);
+      labelRenderer.render(scene, camera);
+    }
+
+    new IntersectionObserver(([entry]) => {
+      if (entry.isIntersecting) {
+        last = performance.now();
+        renderer.setAnimationLoop(frame);
+      } else {
+        renderer.setAnimationLoop(null);
+      }
+    }).observe(stage);
+
+    updateDots();
+    selectPhrase(phraseIds.find((i) => items[i].text === 'My parcel hasn’t arrived') ?? phraseIds[0], 'auto');
+  }
+</script>
+
+<style is:global>
+  .emb-demo {
+    margin: 2rem 0;
+  }
+
+  .emb-stage {
+    position: relative;
+    aspect-ratio: 16 / 10;
+    overflow: hidden;
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-lg);
+    background: var(--surface-inverse);
+  }
+
+  .emb-stage canvas {
+    display: block;
+    width: 100%;
+    height: 100%;
+  }
+
+  .emb-labels {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+  }
+
+  .emb-label {
+    max-width: 220px;
+    padding: 2px 7px;
+    border-left: 3px solid var(--dot);
+    border-radius: var(--radius-xs);
+    background: rgba(30, 37, 40, 0.85);
+    color: var(--syn-text);
+    font-family: var(--font-sans);
+    font-size: 11.5px;
+    white-space: nowrap;
+  }
+
+  .emb-label-on,
+  .emb-label-query {
+    z-index: 2;
+    background: rgba(30, 37, 40, 0.97);
+    font-size: 12.5px;
+    font-weight: 600;
+  }
+
+  .emb-label-query {
+    border-left-color: #fff;
+  }
+
+  .emb-label-hover {
+    z-index: 3;
+    background: #f4f1ea;
+    color: #1e2528;
+  }
+
+  .emb-view {
+    position: absolute;
+    right: 10px;
+    bottom: 10px;
+    display: flex;
+    gap: 6px;
+  }
+
+  .emb-view button {
+    min-width: 32px;
+    min-height: 32px;
+    padding: 2px 10px;
+    border: 1px solid rgba(234, 230, 221, 0.25);
+    border-radius: var(--radius-sm);
+    background: rgba(30, 37, 40, 0.85);
+    color: var(--syn-text);
+    font-size: 13px;
+    cursor: pointer;
+  }
+
+  .emb-view button[aria-pressed='true'] {
+    border-color: var(--syn-text);
+  }
+
+  .emb-hint {
+    position: absolute;
+    left: 12px;
+    bottom: 12px;
+    margin: 0;
+    color: var(--syn-comment);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    pointer-events: none;
+  }
+
+  .emb-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 10px;
+  }
+
+  .emb-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px;
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-pill);
+    background: var(--surface-raised);
+    color: var(--text-strong);
+    font: inherit;
+    font-size: 13px;
+    cursor: pointer;
+  }
+
+  .emb-chip span {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: var(--dot);
+    box-shadow: 0 0 0 1px rgba(30, 37, 40, 0.35);
+  }
+
+  .emb-chip[aria-pressed='false'] {
+    opacity: 0.45;
+    text-decoration: line-through;
+  }
+
+  .emb-panel {
+    margin-top: 12px;
+  }
+
+  .emb-modes {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .emb-demo .tool .emb-modes button[aria-selected='true'] {
+    border-color: var(--accent);
+    background: var(--accent-tint);
+  }
+
+  .emb-demo [data-panel] {
+    display: grid;
+    gap: 12px;
+  }
+
+  .emb-demo [data-panel][hidden] {
+    display: none;
+  }
+
+  .emb-demo .emb-phrase {
+    margin: 0;
+    padding-left: 10px;
+    border-left: 4px solid var(--dot);
+    color: var(--text-strong);
+    font-size: 18px;
+  }
+
+  .emb-demo .emb-meta {
+    margin: 6px 0;
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+    overflow-wrap: anywhere;
+  }
+
+  .emb-strip {
+    display: block;
+    width: 100%;
+    height: 60px;
+    border-radius: var(--radius-md);
+    background: var(--surface-raised);
+  }
+
+  .emb-demo .emb-h {
+    margin: 4px 0 0;
+    font-size: 15px;
+  }
+
+  .emb-demo .emb-list {
+    display: grid;
+    gap: 6px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .emb-demo .emb-list li {
+    margin: 0;
+  }
+
+  .emb-demo .emb-list small {
+    display: block;
+    margin: 2px 0 0 52px;
+    color: var(--text-muted);
+    font-size: 12.5px;
+  }
+
+  .emb-demo .tool .emb-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    min-height: 0;
+    padding: 6px 10px;
+    border: 0;
+    border-left: 4px solid var(--dot);
+    border-radius: var(--radius-sm);
+    background: var(--surface-raised);
+    color: var(--text-strong);
+    font-weight: 500;
+    text-align: left;
+  }
+
+  .emb-item-static {
+    font-size: 14.5px;
+  }
+
+  .emb-score {
+    flex: none;
+    width: 34px;
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    font-size: 13px;
+  }
+
+  .emb-demo .emb-compare-result {
+    margin: 0;
+    color: var(--text-strong);
+    font-size: var(--fs-small);
+  }
+
+  .emb-demo .emb-note {
+    margin: 0;
+    color: var(--text-body);
+    font-size: var(--fs-small);
+  }
+
+  .emb-queries {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .emb-demo .tool .emb-queries button[aria-pressed='true'] {
+    border-color: transparent;
+    background: var(--accent);
+    color: var(--accent-on);
+  }
+
+  @media (max-width: 640px) {
+    .emb-stage {
+      aspect-ratio: auto;
+      height: 360px;
+    }
+
+    .emb-hint {
+      display: none;
+    }
+  }
+</style>
