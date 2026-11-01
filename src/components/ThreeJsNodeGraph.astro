@@ -1,9 +1,19 @@
 ---
-// Three.js Node Graph Component
+// Three.js force-directed node graph: nodes repel, connections act as springs,
+// a weak pull keeps the graph centred, and the simulation cools until it settles.
 ---
 
-<div id="canvas-container" class="canvas-wrapper">
-  <canvas id="experiment-canvas"></canvas>
+<div id="canvas-container" class="canvas-wrapper" data-pagefind-ignore>
+  <canvas
+    id="experiment-canvas"
+    role="img"
+    aria-label="A 3D network of connected spheres that pushes itself apart and settles into a balanced shape."
+  ></canvas>
+  <div class="graph-controls">
+    <span class="graph-status" data-graph="status">Settling</span>
+    <button type="button" data-graph="shake">Shake</button>
+    <button type="button" data-graph="new">New graph</button>
+  </div>
 </div>
 
 <script>
@@ -11,60 +21,44 @@
   import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
   import { trackExperiment } from '../scripts/analytics';
 
+  interface GraphNode {
+    position: THREE.Vector3;
+    velocity: THREE.Vector3;
+    force: THREE.Vector3;
+    degree: number;
+    mesh: THREE.Mesh;
+  }
+
+  type Edge = [number, number];
+
+  // Physics settings
+  const NODE_COUNT = 30;
+  const EXTRA_EDGES = 10; // added on top of a spanning tree, so the graph has loops
+  const REPULSION = 2.5; // strength of the inverse-square push between every pair
+  const SPRING = 0.08; // stiffness of each connection
+  const REST_LENGTH = 2.5; // length a connection settles towards
+  const CENTERING = 0.02; // pull towards the origin, so the graph stays in view
+  const VELOCITY_DECAY = 0.4; // friction: share of velocity lost each step
+  const ALPHA_DECAY = 0.02; // how quickly the simulation cools
+  const ALPHA_MIN = 0.002; // below this the graph counts as settled
+
   const container = document.getElementById('canvas-container');
   const canvas = document.getElementById('experiment-canvas');
-  
+
   if (container && canvas) {
+    const statusEl = container.querySelector<HTMLElement>('[data-graph="status"]')!;
+
     const scene = new THREE.Scene();
-    const camera = new THREE.PerspectiveCamera(
-      75, 
-      container.clientWidth / container.clientHeight, 
-      0.1, 
-      1000
-    );
-    
-    const renderer = new THREE.WebGLRenderer({ 
-      canvas: canvas as HTMLCanvasElement, 
-      antialias: true 
+    const camera = new THREE.PerspectiveCamera(60, 1, 0.1, 1000);
+    camera.position.set(0, 0, 22);
+
+    const renderer = new THREE.WebGLRenderer({
+      canvas: canvas as HTMLCanvasElement,
+      antialias: true,
     });
-    renderer.setSize(container.clientWidth, container.clientHeight);
-    renderer.setClearColor(0x0a0a0a);
-    
-    // Create nodes
-    const nodeMaterial = new THREE.MeshBasicMaterial({ color: 0x4a9eff });
-    const nodes: THREE.Mesh[] = [];
-    
-    for (let i = 0; i < 12; i++) {
-      const geometry = new THREE.SphereGeometry(0.3, 16, 16);
-      const node = new THREE.Mesh(geometry, nodeMaterial);
-      
-      // Random position
-      node.position.x = (Math.random() - 0.5) * 10;
-      node.position.y = (Math.random() - 0.5) * 10;
-      node.position.z = (Math.random() - 0.5) * 10;
-      
-      scene.add(node);
-      nodes.push(node);
-    }
-    
-    // Create connections
-    const lineMaterial = new THREE.LineBasicMaterial({ color: 0x2a2a2a });
-    const lines: THREE.Line[] = [];
-    
-    for (let i = 0; i < nodes.length; i++) {
-      for (let j = i + 1; j < nodes.length; j++) {
-        if (Math.random() > 0.7) {
-          const points = [nodes[i].position, nodes[j].position];
-          const geometry = new THREE.BufferGeometry().setFromPoints(points);
-          const line = new THREE.Line(geometry, lineMaterial);
-          scene.add(line);
-          lines.push(line);
-        }
-      }
-    }
-    
-    camera.position.z = 15;
-    
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setClearColor(0x1e2528);
+
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
     controls.dampingFactor = 0.05;
@@ -76,27 +70,182 @@
     }
     controls.addEventListener('start', onFirstInteraction);
 
+    // ---------- Graph ----------
+    const nodeGeometry = new THREE.SphereGeometry(0.3, 16, 16);
+    const nodeMaterial = new THREE.MeshBasicMaterial({ color: 0x8fcbbe });
+    const lineMaterial = new THREE.LineBasicMaterial({ color: 0x7f8786, transparent: true, opacity: 0.7 });
+
+    let nodes: GraphNode[] = [];
+    let edges: Edge[] = [];
+    let lines: THREE.LineSegments | null = null;
+    let alpha = 1;
+
+    function randomPoint(spread: number) {
+      return new THREE.Vector3(
+        (Math.random() - 0.5) * spread,
+        (Math.random() - 0.5) * spread,
+        (Math.random() - 0.5) * spread
+      );
+    }
+
+    function buildGraph() {
+      nodes.forEach((n) => scene.remove(n.mesh));
+      if (lines) {
+        scene.remove(lines);
+        lines.geometry.dispose();
+      }
+
+      // Connect each new node to an earlier one: a random spanning tree, so nothing floats off alone
+      const keys = new Set<string>();
+      edges = [];
+      const addEdge = (a: number, b: number) => {
+        const key = a < b ? `${a}-${b}` : `${b}-${a}`;
+        if (a === b || keys.has(key)) return false;
+        keys.add(key);
+        edges.push([a, b]);
+        return true;
+      };
+      for (let i = 1; i < NODE_COUNT; i++) addEdge(i, Math.floor(Math.random() * i));
+      let extra = 0;
+      while (extra < EXTRA_EDGES) {
+        if (addEdge(Math.floor(Math.random() * NODE_COUNT), Math.floor(Math.random() * NODE_COUNT))) extra++;
+      }
+
+      const degree = new Array(NODE_COUNT).fill(0);
+      for (const [a, b] of edges) {
+        degree[a]++;
+        degree[b]++;
+      }
+
+      nodes = degree.map((d) => {
+        const mesh = new THREE.Mesh(nodeGeometry, nodeMaterial);
+        mesh.scale.setScalar(0.8 + Math.min(d, 6) * 0.15); // busier nodes are larger
+        scene.add(mesh);
+        return {
+          position: randomPoint(10),
+          velocity: new THREE.Vector3(),
+          force: new THREE.Vector3(),
+          degree: d,
+          mesh,
+        };
+      });
+
+      // All connections in one LineSegments object: two points per edge, rewritten each step
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute(
+        'position',
+        new THREE.BufferAttribute(new Float32Array(edges.length * 6), 3).setUsage(THREE.DynamicDrawUsage)
+      );
+      lines = new THREE.LineSegments(geometry, lineMaterial);
+      lines.frustumCulled = false;
+      scene.add(lines);
+
+      alpha = 1;
+      syncScene();
+    }
+
+    // ---------- Physics ----------
+    const delta = new THREE.Vector3();
+
+    function step() {
+      for (const n of nodes) n.force.set(0, 0, 0);
+
+      // Repulsion: every pair pushes apart, harder the closer they are (inverse square)
+      for (let i = 0; i < nodes.length; i++) {
+        for (let j = i + 1; j < nodes.length; j++) {
+          delta.subVectors(nodes[i].position, nodes[j].position);
+          const distSq = Math.max(delta.lengthSq(), 0.01);
+          delta.multiplyScalar(REPULSION / (distSq * Math.sqrt(distSq)));
+          nodes[i].force.add(delta);
+          nodes[j].force.sub(delta);
+        }
+      }
+
+      // Springs: each connection pulls or pushes towards its rest length (Hooke's law)
+      for (const [a, b] of edges) {
+        delta.subVectors(nodes[b].position, nodes[a].position);
+        const dist = Math.max(delta.length(), 0.01);
+        delta.multiplyScalar((SPRING * (dist - REST_LENGTH)) / dist);
+        nodes[a].force.add(delta);
+        nodes[b].force.sub(delta);
+      }
+
+      // Centering, then integrate: forces fade as alpha cools, friction removes energy
+      for (const n of nodes) {
+        n.force.addScaledVector(n.position, -CENTERING);
+        n.velocity.addScaledVector(n.force, alpha);
+        n.velocity.multiplyScalar(1 - VELOCITY_DECAY);
+        n.position.add(n.velocity);
+      }
+
+      alpha += (0 - alpha) * ALPHA_DECAY;
+    }
+
+    function syncScene() {
+      nodes.forEach((n) => n.mesh.position.copy(n.position));
+      if (!lines) return;
+      const attr = lines.geometry.attributes.position as THREE.BufferAttribute;
+      const arr = attr.array as Float32Array;
+      edges.forEach(([a, b], i) => {
+        nodes[a].position.toArray(arr, i * 6);
+        nodes[b].position.toArray(arr, i * 6 + 3);
+      });
+      attr.needsUpdate = true;
+    }
+
+    function setStatus() {
+      const text = alpha > ALPHA_MIN ? 'Settling' : 'Settled';
+      if (statusEl.textContent !== text) statusEl.textContent = text;
+    }
+
+    // ---------- Controls ----------
+    container.querySelector('[data-graph="shake"]')!.addEventListener('click', () => {
+      for (const n of nodes) n.velocity.add(randomPoint(1.5));
+      alpha = 1;
+      trackExperiment('node-graph', 'shake');
+    });
+
+    container.querySelector('[data-graph="new"]')!.addEventListener('click', () => {
+      buildGraph();
+      trackExperiment('node-graph', 'new-graph');
+    });
+
+    // ---------- Loop: runs only while the graph is on screen ----------
     function animate() {
-      requestAnimationFrame(animate);
+      if (alpha > ALPHA_MIN) {
+        step();
+        syncScene();
+      }
+      setStatus();
       controls.update();
       renderer.render(scene, camera);
     }
-    
-    animate();
-    
-    // Handle resize
+
     function onResize() {
       if (!container) return;
-      camera.aspect = container.clientWidth / container.clientHeight;
+      const w = container.clientWidth;
+      const h = container.clientHeight;
+      if (!w || !h) return;
+      camera.aspect = w / h;
       camera.updateProjectionMatrix();
-      renderer.setSize(container.clientWidth, container.clientHeight);
+      renderer.setSize(w, h, false);
     }
-    
-    window.addEventListener('resize', onResize);
-    
-    // Cleanup on unmount
+
+    const resizeObserver = new ResizeObserver(onResize);
+    resizeObserver.observe(container);
+    onResize();
+
+    const visibility = new IntersectionObserver(([entry]) => {
+      renderer.setAnimationLoop(entry.isIntersecting ? animate : null);
+    });
+    visibility.observe(container);
+
+    buildGraph();
+
     document.addEventListener('astro:before-swap', () => {
-      window.removeEventListener('resize', onResize);
+      renderer.setAnimationLoop(null);
+      resizeObserver.disconnect();
+      visibility.disconnect();
       renderer.dispose();
     });
   }
@@ -104,8 +253,10 @@
 
 <style>
   .canvas-wrapper {
+    position: relative;
     width: 100%;
     height: 500px;
+    overflow: hidden;
     background: var(--surface-inverse);
     border-radius: 0.5rem;
     margin: 2rem 0;
@@ -118,9 +269,47 @@
     height: 100%;
   }
 
+  .graph-controls {
+    position: absolute;
+    top: 1rem;
+    right: 1rem;
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+  }
+
+  .graph-status {
+    margin-right: 0.25rem;
+    color: var(--syn-muted);
+    font-family: var(--font-mono);
+    font-size: 0.8125rem;
+  }
+
+  button {
+    background: var(--surface-card);
+    color: var(--text-strong);
+    border: 1px solid var(--border-default);
+    padding: 0.5rem 1rem;
+    border-radius: 0.25rem;
+    font-family: var(--font-mono);
+    font-size: 0.875rem;
+    cursor: pointer;
+    transition: background 0.2s, border-color 0.2s;
+  }
+
+  button:hover {
+    background: var(--surface-raised);
+    border-color: var(--accent);
+  }
+
   @media (max-width: 768px) {
     .canvas-wrapper {
       height: 400px;
+    }
+
+    .graph-controls {
+      top: 0.5rem;
+      right: 0.5rem;
     }
   }
 </style>

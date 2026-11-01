@@ -1,146 +1,145 @@
 ---
 layout: ../../layouts/ContentLayout.astro
-title: "Three.js: Animated Node Graph"
-description: "3D visualization of connected nodes with physics simulation. Work in progress."
-tags: [threejs, visualization, work-in-progress]
-updated: "2026-02-08"
+title: "Three.js: Force-Directed Node Graph"
+description: "A 3D force-directed graph in Three.js. Nodes repel, connections act as springs, and the layout cools until it settles."
+tags: [threejs, visualization, simulation]
+updated: "2026-11-01"
 ---
 
 import ThreeJsNodeGraph from '../../components/ThreeJsNodeGraph.astro';
 
-## Objective
+## Overview
 
-Visualize a network of connected nodes in 3D space with:
-- Nodes as spheres
-- Connections as lines
-- Simple physics (nodes repel, connections pull)
-- Camera controls for rotation and zoom
+A network of 30 connected nodes lays itself out in 3D using a <span class="jargon" data-tooltip="A layout method that treats a graph as a physical system: nodes push each other away, connections pull like springs, and the shape that balances those forces becomes the layout">force-directed</span> simulation:
 
-## Current State
+- Every node pushes every other node away.
+- Every connection acts as a spring with a preferred length.
+- A weak pull towards the centre keeps the graph in view.
+- The simulation cools over a few seconds until the graph settles.
 
-Basic scene rendering with static nodes. Drag to rotate, scroll to zoom.
+The result spreads tightly connected groups apart from each other without anyone choosing positions by hand. The same idea is behind most network diagrams, from dependency graphs to social networks.
 
 ## Demo
 
 <ThreeJsNodeGraph />
 
-## Code
+Drag to rotate and scroll to zoom. **Shake** kicks every node and reheats the simulation. **New graph** builds a different random network. Larger spheres have more connections.
 
-### Basic Setup
+## How it works
 
-```javascript
-import * as THREE from 'three';
-import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+### Building a connected graph
 
-// Scene setup
-const scene = new THREE.Scene();
-const camera = new THREE.PerspectiveCamera(75, width / height, 0.1, 1000);
-const renderer = new THREE.WebGLRenderer({ antialias: true });
-renderer.setClearColor(0x0a0a0a);
-
-// Camera controls
-const controls = new OrbitControls(camera, renderer.domElement);
-controls.enableDamping = true;
-controls.dampingFactor = 0.05;
-```
-
-### Create Nodes
+Picking random pairs of nodes often leaves some nodes unconnected. With nothing pulling them back, the repulsion pushes them away for good. Instead, the graph starts as a random <span class="jargon" data-tooltip="A set of connections that links every node with no loops">spanning tree</span>: each node connects to a random earlier node. Ten extra random connections then add some loops.
 
 ```javascript
-const nodeMaterial = new THREE.MeshBasicMaterial({ color: 0x4a9eff });
-const nodes = [];
+// Each node links to one earlier node, so the graph is always connected
+for (let i = 1; i < NODE_COUNT; i++) {
+  addEdge(i, Math.floor(Math.random() * i));
+}
 
-for (let i = 0; i < 12; i++) {
-  const geometry = new THREE.SphereGeometry(0.3, 16, 16);
-  const node = new THREE.Mesh(geometry, nodeMaterial);
-  
-  node.position.x = (Math.random() - 0.5) * 10;
-  node.position.y = (Math.random() - 0.5) * 10;
-  node.position.z = (Math.random() - 0.5) * 10;
-  
-  scene.add(node);
-  nodes.push(node);
+// Then a few extra connections for loops and clusters
+let extra = 0;
+while (extra < EXTRA_EDGES) {
+  if (addEdge(randomNode(), randomNode())) extra++; // skips duplicates and self-links
 }
 ```
 
-### Create Connections
+### The forces
+
+Each step starts every node's force at zero and then adds three forces.
+
+**Repulsion.** Every pair of nodes pushes apart with an inverse-square force, like electric charges. Close nodes push hard, distant ones barely notice each other. The distance has a floor so that two nodes in nearly the same place don't produce an enormous force.
 
 ```javascript
-const lineMaterial = new THREE.LineBasicMaterial({ color: 0x2a2a2a });
-
 for (let i = 0; i < nodes.length; i++) {
   for (let j = i + 1; j < nodes.length; j++) {
-    if (Math.random() > 0.7) {
-      const points = [nodes[i].position, nodes[j].position];
-      const geometry = new THREE.BufferGeometry().setFromPoints(points);
-      const line = new THREE.Line(geometry, lineMaterial);
-      scene.add(line);
-    }
+    delta.subVectors(nodes[i].position, nodes[j].position);
+    const distSq = Math.max(delta.lengthSq(), 0.01);
+    // Direction times REPULSION / distance²
+    delta.multiplyScalar(REPULSION / (distSq * Math.sqrt(distSq)));
+    nodes[i].force.add(delta);
+    nodes[j].force.sub(delta);
   }
 }
 ```
 
-### Animation Loop
+**Springs.** Each connection follows Hooke's law. Stretched beyond its rest length, it pulls the two nodes together. Squashed shorter, it pushes them apart.
 
 ```javascript
-function animate() {
-  requestAnimationFrame(animate);
-  controls.update();
-  renderer.render(scene, camera);
+for (const [a, b] of edges) {
+  delta.subVectors(nodes[b].position, nodes[a].position);
+  const dist = Math.max(delta.length(), 0.01);
+  delta.multiplyScalar((SPRING * (dist - REST_LENGTH)) / dist);
+  nodes[a].force.add(delta);
+  nodes[b].force.sub(delta);
 }
-
-animate();
 ```
 
-### Physics (Future Implementation)
+**Centering.** A weak force proportional to each node's distance from the origin. Without it, the graph can drift off screen while it settles.
+
+### Integration and cooling
+
+Forces change velocity and velocity changes position. Two things stop the graph from bouncing forever:
+
+- **Friction.** Each step removes 40% of every node's velocity.
+- **Cooling.** Forces are scaled by `alpha`, which starts at 1 and decays towards 0. Early steps make big moves to untangle the graph. Later steps only make fine adjustments.
 
 ```javascript
-// Basic node structure
-class Node {
-  constructor(x, y, z) {
-    this.position = new THREE.Vector3(x, y, z);
-    this.velocity = new THREE.Vector3(0, 0, 0);
-    this.connections = [];
-  }
-  
-  applyForce(force) {
-    this.velocity.add(force);
-  }
-  
-  update() {
-    this.position.add(this.velocity);
-    this.velocity.multiplyScalar(0.95); // Damping
-  }
+for (const n of nodes) {
+  n.force.addScaledVector(n.position, -CENTERING);
+  n.velocity.addScaledVector(n.force, alpha);
+  n.velocity.multiplyScalar(1 - VELOCITY_DECAY);
+  n.position.add(n.velocity);
 }
 
-// Node repulsion
-function applyRepulsion(nodes) {
-  for (let i = 0; i < nodes.length; i++) {
-    for (let j = i + 1; j < nodes.length; j++) {
-      const direction = nodes[i].position.clone().sub(nodes[j].position);
-      const distance = direction.length();
-      
-      if (distance < 5) {
-        const force = direction.normalize().multiplyScalar(0.01 / distance);
-        nodes[i].applyForce(force);
-        nodes[j].applyForce(force.negate());
-      }
-    }
-  }
-}
+alpha += (0 - alpha) * ALPHA_DECAY;
 ```
 
-## Next Steps
+Once `alpha` drops below a small threshold, after about five seconds, the simulation stops stepping and the graph counts as settled. The scene keeps rendering so the camera controls still work. **Shake** adds a random velocity to every node and sets `alpha` back to 1.
 
-- [ ] Implement node repulsion
-- [ ] Add connection spring forces
-- [ ] Mouse interaction (hover, drag nodes)
-- [ ] Load data from external source
-- [ ] Node labels on hover
-- [ ] Performance optimization for large graphs
+The forces and the cooling are the same approach used by [d3-force](https://d3js.org/d3-force), which runs the same kind of simulation in 2D.
 
-## Notes
+### Drawing the connections
 
-- Using Three.js r160+
-- OrbitControls for camera manipulation
-- May need WebGL2 for larger datasets
+All connections live in one `LineSegments` object, with two points per connection in a single buffer. Each step rewrites the buffer from the node positions, so moving every line costs one buffer upload.
+
+```javascript
+const geometry = new THREE.BufferGeometry();
+geometry.setAttribute('position',
+  new THREE.BufferAttribute(new Float32Array(edges.length * 6), 3)
+    .setUsage(THREE.DynamicDrawUsage));
+const lines = new THREE.LineSegments(geometry, lineMaterial);
+
+// After each step
+edges.forEach(([a, b], i) => {
+  nodes[a].position.toArray(array, i * 6);
+  nodes[b].position.toArray(array, i * 6 + 3);
+});
+geometry.attributes.position.needsUpdate = true;
+```
+
+## Tuning parameters
+
+```javascript
+const REPULSION = 2.5;        // Higher spreads the graph out
+const SPRING = 0.08;          // Higher makes connections stiffer
+const REST_LENGTH = 2.5;      // Preferred length of a connection
+const CENTERING = 0.02;       // Higher pulls the graph into a tighter ball
+const VELOCITY_DECAY = 0.4;   // Higher damps faster, but can freeze too early
+const ALPHA_DECAY = 0.02;     // Higher settles sooner, with a less tidy layout
+```
+
+Repulsion and springs work against each other. If repulsion is too strong relative to the springs, clusters blur into an even cloud. If it is too weak, everything collapses into a knot.
+
+## Performance notes
+
+- Repulsion compares every pair of nodes, so its cost grows with the square of the node count. Thirty nodes is trivial. Beyond a few thousand, use a Barnes-Hut approximation, which groups distant nodes in an octree and treats each group as one node.
+- All nodes share one geometry and one material. For thousands of nodes, an `InstancedMesh` would draw them in a single call.
+- The simulation stops once it has settled, and the animation loop only runs while the graph is on screen.
+
+## Extensions
+
+- Drag individual nodes, pinning them while the rest of the graph adjusts
+- Node labels on hover, using raycasting
+- Load a real graph, such as package dependencies or table foreign keys
+- Colour nodes by detected community
