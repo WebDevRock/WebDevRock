@@ -1,0 +1,970 @@
+---
+// Integration pipeline as a particle flow: each particle is one message moving from a source,
+// through a queue and a worker, to an external API. Failures retry with a configurable backoff,
+// an optional circuit breaker pauses calls, and exhausted or invalid items park in "Needs attention".
+import '../styles/tools.css';
+---
+
+<div class="pipeline-flow" data-pagefind-ignore>
+  <div class="pf-stage" data-pf="stage">
+    <canvas
+      data-pf="canvas"
+      role="img"
+      aria-label="Animated 3D pipeline. Messages move from a source into a queue, through a worker to an API, and on to delivered. Failed calls loop back to the queue to retry; items that cannot be delivered collect in a Needs attention bin. The figures below the animation describe its current state."
+    ></canvas>
+    <ul class="pf-legend" aria-hidden="true">
+      <li><span style="--dot: #8FCBBE"></span>New</li>
+      <li><span style="--dot: #E2BD73"></span>Retrying</li>
+      <li><span style="--dot: #6F6450"></span>Waiting to retry</li>
+      <li><span style="--dot: #9ED39A"></span>Delivered</li>
+      <li><span style="--dot: #C9B4DC"></span>Bad data</li>
+      <li><span style="--dot: #E8846F"></span>Out of attempts</li>
+    </ul>
+    <p class="pf-hint" data-pf="hint" hidden>Drag to rotate</p>
+  </div>
+
+  <dl class="pf-stats">
+    <div><dt>Delivered</dt><dd data-stat="delivered">0</dd></div>
+    <div><dt>In queue</dt><dd data-stat="queued">0</dd><dd class="pf-sub" data-stat="waiting"></dd></div>
+    <div><dt>Worker busy</dt><dd data-stat="inflight">0 / 12</dd></div>
+    <div><dt>API calls / s</dt><dd data-stat="calls">0.0</dd></div>
+    <div><dt>Needs attention</dt><dd data-stat="parked">0</dd><dd class="pf-sub" data-stat="parked-detail"></dd></div>
+    <div><dt>Circuit breaker</dt><dd data-stat="breaker">Off</dd></div>
+  </dl>
+
+  <div class="tool pf-controls">
+    <div class="pf-presets" role="group" aria-label="Scenarios">
+      <span class="pf-presets-label">Scenario</span>
+      <button type="button" class="small" data-preset="healthy">Healthy</button>
+      <button type="button" class="small" data-preset="outage-no-backoff">Outage, retry at once</button>
+      <button type="button" class="small" data-preset="outage-backoff">Outage, with backoff</button>
+      <button type="button" class="small" data-preset="outage-breaker">Outage, backoff and breaker</button>
+      <button type="button" class="small" data-preset="bad-data">Bad data</button>
+    </div>
+
+    <div class="tool-row">
+      <label>
+        <span class="pf-label-row">Arrival rate <output data-out="rate"></output></span>
+        <input type="range" data-field="rate" min="0.5" max="12" step="0.5" />
+      </label>
+      <label>
+        <span class="pf-label-row">Transient errors <output data-out="transient"></output></span>
+        <input type="range" data-field="transient" min="0" max="60" step="5" />
+      </label>
+      <label>
+        <span class="pf-label-row">Bad data <output data-out="bad"></output></span>
+        <input type="range" data-field="bad" min="0" max="30" step="1" />
+      </label>
+    </div>
+
+    <div class="tool-row">
+      <label>
+        <span class="pf-label-row">Max attempts <output data-out="maxAttempts"></output></span>
+        <input type="range" data-field="maxAttempts" min="1" max="10" step="1" />
+      </label>
+      <label>
+        Backoff between attempts
+        <select data-field="backoff">
+          <option value="none">None (retry at once)</option>
+          <option value="fixed">Fixed (2 s)</option>
+          <option value="exponential">Exponential with jitter (2 s to 32 s)</option>
+        </select>
+      </label>
+      <label class="pf-check">
+        <input type="checkbox" data-field="breaker" />
+        Circuit breaker (opens after 5 failures in a row, for 5 s)
+      </label>
+    </div>
+
+    <div class="tool-actions">
+      <button type="button" class="primary" data-action="outage" aria-pressed="false">Start API outage</button>
+      <button type="button" data-action="requeue">Requeue needs attention</button>
+      <button type="button" data-action="pause">Pause</button>
+      <button type="button" data-action="reset">Reset</button>
+    </div>
+
+    <p class="tool-status" data-pf="status" aria-live="polite"></p>
+  </div>
+</div>
+
+<script>
+  import * as THREE from 'three';
+  import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+  import { CSS2DRenderer, CSS2DObject } from 'three/examples/jsm/renderers/CSS2DRenderer.js';
+  import { trackExperiment } from '../scripts/analytics';
+
+  type Backoff = 'none' | 'fixed' | 'exponential';
+  type Phase = 'moving' | 'queued' | 'calling' | 'parked' | 'fading';
+  type After = 'queue' | 'call' | 'deliver' | 'park';
+
+  interface Leg {
+    curve: THREE.Curve<THREE.Vector3>;
+    dur: number;
+  }
+
+  interface Item {
+    phase: Phase;
+    then: After;
+    legs: Leg[];
+    legStart: number;
+    attempts: number;
+    bad: boolean;
+    nextAt: number;
+    holdUntil: number;
+    fadeStart: number;
+    probe: boolean;
+    reason: 'bad' | 'exhausted' | null;
+    pos: THREE.Vector3;
+    jitter: THREE.Vector3;
+    dead: boolean;
+  }
+
+  interface Settings {
+    rate: number;
+    transient: number;
+    bad: number;
+    maxAttempts: number;
+    backoff: Backoff;
+    breaker: boolean;
+    outage: boolean;
+  }
+
+  // Simulation constants. Time is in simulated seconds.
+  const CONCURRENCY = 12; // calls the worker can have open at once
+  const SPEED = 12; // scene units per second along a pipe
+  const LATENCY_OK = 0.35; // a normal API response
+  const LATENCY_OUTAGE = 0.25; // a quick 503 while the API is down
+  const BREAKER_THRESHOLD = 5;
+  const BREAKER_COOLDOWN = 5;
+  const QUEUE_CAP = 400; // the source is held back when the queue reaches this
+  const MAX_ITEMS = 5000;
+  const SLOT = 0.42;
+
+  const PRESETS: Record<string, Settings> = {
+    healthy: { rate: 2, transient: 0.1, bad: 0, maxAttempts: 5, backoff: 'exponential', breaker: false, outage: false },
+    'outage-no-backoff': { rate: 2, transient: 0.1, bad: 0, maxAttempts: 5, backoff: 'none', breaker: false, outage: true },
+    'outage-backoff': { rate: 2, transient: 0.1, bad: 0, maxAttempts: 5, backoff: 'exponential', breaker: false, outage: true },
+    'outage-breaker': { rate: 2, transient: 0.1, bad: 0, maxAttempts: 5, backoff: 'exponential', breaker: true, outage: true },
+    'bad-data': { rate: 2, transient: 0.1, bad: 0.15, maxAttempts: 5, backoff: 'exponential', breaker: false, outage: false },
+  };
+
+  const root = document.querySelector<HTMLElement>('.pipeline-flow');
+  if (root) init(root);
+
+  function init(root: HTMLElement) {
+    const stage = root.querySelector<HTMLElement>('[data-pf="stage"]')!;
+    const canvas = root.querySelector<HTMLCanvasElement>('[data-pf="canvas"]')!;
+    const statusEl = root.querySelector<HTMLElement>('[data-pf="status"]')!;
+    const q = <T extends HTMLElement>(sel: string) => root.querySelector<T>(sel)!;
+    const stat = (name: string) => q<HTMLElement>(`[data-stat="${name}"]`);
+
+    const settings: Settings = { ...PRESETS.healthy };
+
+    // ---------- Scene ----------
+    const BG = 0x1e2528;
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 200);
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setClearColor(BG);
+
+    const labelRenderer = new CSS2DRenderer();
+    labelRenderer.domElement.className = 'pf-labels';
+    stage.appendChild(labelRenderer.domElement);
+
+    // Station positions, left to right, with the needs-attention bin under the API
+    const S = new THREE.Vector3(-12, 0, 0); // source
+    const Q = new THREE.Vector3(-5, 0, 0); // queue
+    const W = new THREE.Vector3(1, 0, 0); // worker
+    const A = new THREE.Vector3(7, 0, 0); // external API
+    const D = new THREE.Vector3(13, 0, 0); // delivered
+    const P = new THREE.Vector3(7, -5, 0); // needs attention
+
+    const EDGE = 0x8fb8b0;
+    function station(pos: THREE.Vector3, size: [number, number, number], color = EDGE) {
+      const geo = new THREE.BoxGeometry(...size);
+      const edgeMat = new THREE.LineBasicMaterial({ color });
+      const faceMat = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.06, depthWrite: false });
+      const group = new THREE.Group();
+      group.add(new THREE.LineSegments(new THREE.EdgesGeometry(geo), edgeMat));
+      group.add(new THREE.Mesh(geo, faceMat));
+      group.position.copy(pos);
+      scene.add(group);
+      return { group, edgeMat, faceMat };
+    }
+
+    station(S, [1.4, 1.4, 1.4]);
+    station(Q, [3, 2, 2.4]);
+    station(W, [2, 1.6, 1.6]);
+    const api = station(A, [1.8, 1.8, 1.8]);
+    station(D, [1.4, 1.4, 1.4]);
+    station(P, [4.2, 1.6, 2.4], 0xe8846f);
+
+    const ring = new THREE.Mesh(
+      new THREE.TorusGeometry(1.6, 0.06, 8, 64),
+      new THREE.MeshBasicMaterial({ color: 0x9ed39a })
+    );
+    ring.position.copy(A);
+    ring.visible = false;
+    scene.add(ring);
+
+    function label(text: string, pos: THREE.Vector3) {
+      const el = document.createElement('div');
+      el.className = 'pf-label';
+      el.textContent = text;
+      const obj = new CSS2DObject(el);
+      obj.position.copy(pos);
+      scene.add(obj);
+      return el;
+    }
+
+    label('Source', new THREE.Vector3(S.x, 1.3, 0));
+    const queueLabel = label('Queue', new THREE.Vector3(Q.x, -1.6, 1.2));
+    const workerLabel = label('Worker', new THREE.Vector3(W.x, 1.25, 0));
+    const apiLabel = label('External API', new THREE.Vector3(A.x, 2.1, 0));
+    const deliveredLabel = label('Delivered', new THREE.Vector3(D.x, 1.3, 0));
+    const parkLabel = label('Needs attention', new THREE.Vector3(P.x, -7.1, 0));
+
+    // ---------- Pipes ----------
+    const v = (x: number, y: number, z: number) => new THREE.Vector3(x, y, z);
+    const leg = (curve: THREE.Curve<THREE.Vector3>): Leg => ({ curve, dur: curve.getLength() / SPEED });
+
+    const curves = {
+      sourceToQueue: new THREE.LineCurve3(v(-11.3, 0, 0), v(-6.6, 0, 0)),
+      workerToApi: new THREE.LineCurve3(v(1, 0, 0), v(7, 0, 0)),
+      apiToDelivered: new THREE.LineCurve3(v(7, 0, 0), v(13, 0, 0)),
+      apiToRetry: new THREE.CatmullRomCurve3([v(7, 0.9, 0), v(6.4, 3, -1), v(3, 4.4, -2), v(-2, 4.4, -2), v(-4.6, 3, -1), v(-5, 1.3, 0)]),
+      apiToPark: new THREE.CatmullRomCurve3([v(7.9, 0, 0), v(8.6, -1.8, 0.3), v(7.4, -3.6, 0)]),
+      requeue: new THREE.CatmullRomCurve3([v(5, -5, 0), v(1, -6.2, 1.6), v(-4, -4.4, 1.2), v(-5, -1.3, 0)]),
+    };
+    const legs = {
+      sourceToQueue: leg(curves.sourceToQueue),
+      workerToApi: leg(curves.workerToApi),
+      apiToDelivered: leg(curves.apiToDelivered),
+      apiToRetry: { curve: curves.apiToRetry, dur: curves.apiToRetry.getLength() / (SPEED * 2) }, // the trip back is quick; any wait is the backoff
+      apiToPark: leg(curves.apiToPark),
+    };
+
+    function pipe(curve: THREE.Curve<THREE.Vector3>, color: number, dashed = false) {
+      const geo = new THREE.BufferGeometry().setFromPoints(curve.getPoints(80));
+      const mat = dashed
+        ? new THREE.LineDashedMaterial({ color, dashSize: 0.3, gapSize: 0.25, transparent: true, opacity: 0.55 })
+        : new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.45 });
+      const line = new THREE.Line(geo, mat);
+      if (dashed) line.computeLineDistances();
+      scene.add(line);
+    }
+
+    pipe(curves.sourceToQueue, 0x7f8786);
+    pipe(new THREE.LineCurve3(v(-3.5, 0, 0), v(0, 0, 0)), 0x7f8786);
+    pipe(curves.workerToApi, 0x7f8786);
+    pipe(curves.apiToDelivered, 0x7f8786);
+    pipe(curves.apiToRetry, 0xe2bd73, true);
+    pipe(curves.apiToPark, 0xe8846f, true);
+    pipe(curves.requeue, 0x8fcbbe, true);
+
+    // ---------- Particles: one Points object, one vertex per message ----------
+    const positions = new Float32Array(MAX_ITEMS * 3);
+    const colors = new Float32Array(MAX_ITEMS * 3);
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3).setUsage(THREE.DynamicDrawUsage));
+    geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3).setUsage(THREE.DynamicDrawUsage));
+    geometry.setDrawRange(0, 0);
+
+    const material = new THREE.PointsMaterial({
+      size: 0.46,
+      vertexColors: true,
+      map: dotTexture(),
+      alphaTest: 0.5,
+      sizeAttenuation: true,
+    });
+    const points = new THREE.Points(geometry, material);
+    points.frustumCulled = false; // positions change every frame; skip bounding-sphere updates
+    scene.add(points);
+
+    const C = {
+      fresh: new THREE.Color(0x8fcbbe),
+      retry: new THREE.Color(0xe2bd73),
+      done: new THREE.Color(0x9ed39a),
+      bad: new THREE.Color(0xc9b4dc),
+      exhausted: new THREE.Color(0xe8846f),
+      bg: new THREE.Color(BG),
+    };
+    const tmpColor = new THREE.Color();
+    const tmpVec = new THREE.Vector3();
+
+    // ---------- Simulation state ----------
+    let now = 0;
+    let items: Item[] = [];
+    let queue: Item[] = [];
+    let parked: Item[] = [];
+    let inFlight = 0;
+    let delivered = 0;
+    let spawnAcc = 0;
+    let held = false;
+    let calls: number[] = [];
+    const breaker = { state: 'closed' as 'closed' | 'open' | 'half', openUntil: 0, consecutive: 0, probeInFlight: false };
+
+    function resetSim() {
+      items = [];
+      queue = [];
+      parked = [];
+      inFlight = 0;
+      delivered = 0;
+      spawnAcc = 0;
+      held = false;
+      calls = [];
+      breaker.state = 'closed';
+      breaker.consecutive = 0;
+      breaker.probeInFlight = false;
+    }
+
+    function randomJitter() {
+      return new THREE.Vector3((Math.random() - 0.5) * 0.5, (Math.random() - 0.5) * 0.5, (Math.random() - 0.5) * 0.5);
+    }
+
+    function moveAlong(item: Item, path: Leg[], then: After) {
+      item.phase = 'moving';
+      item.legs = path;
+      item.legStart = now;
+      item.then = then;
+    }
+
+    function spawn() {
+      const item: Item = {
+        phase: 'moving',
+        then: 'queue',
+        legs: [],
+        legStart: now,
+        attempts: 0,
+        bad: Math.random() < settings.bad,
+        nextAt: 0,
+        holdUntil: 0,
+        fadeStart: 0,
+        probe: false,
+        reason: null,
+        pos: S.clone(),
+        jitter: randomJitter(),
+        dead: false,
+      };
+      items.push(item);
+      moveAlong(item, [legs.sourceToQueue], 'queue');
+    }
+
+    function backoffDelay(attempts: number) {
+      if (settings.backoff === 'none') return 0;
+      if (settings.backoff === 'fixed') return 2;
+      // Exponential: 2, 4, 8, 16, 32 s (capped), with equal jitter so retries spread out
+      const d = Math.min(32, 2 ** attempts);
+      return d / 2 + Math.random() * (d / 2);
+    }
+
+    function breakerAllows() {
+      if (!settings.breaker) return true;
+      if (breaker.state === 'open' && now >= breaker.openUntil) breaker.state = 'half';
+      if (breaker.state === 'open') return false;
+      if (breaker.state === 'half') return !breaker.probeInFlight;
+      return true;
+    }
+
+    function openBreaker() {
+      breaker.state = 'open';
+      breaker.openUntil = now + BREAKER_COOLDOWN;
+    }
+
+    function dispatch() {
+      while (inFlight < CONCURRENCY && breakerAllows()) {
+        const i = queue.findIndex((it) => it.nextAt <= now);
+        if (i < 0) return;
+        const item = queue.splice(i, 1)[0];
+        inFlight++;
+        if (settings.breaker && breaker.state === 'half') {
+          breaker.probeInFlight = true;
+          item.probe = true;
+        }
+        // Start the pipe from wherever the item sits in the queue, so it doesn't jump
+        const start = item.pos.clone().sub(item.jitter);
+        const toWorker = new THREE.QuadraticBezierCurve3(start, v(-2.2, 0, 0), W.clone());
+        moveAlong(item, [leg(toWorker), legs.workerToApi], 'call');
+      }
+    }
+
+    function park(item: Item, reason: 'bad' | 'exhausted') {
+      item.reason = reason;
+      moveAlong(item, [legs.apiToPark], 'park');
+    }
+
+    // The API has answered (or timed out): decide what happens to the item
+    function resolve(item: Item) {
+      inFlight--;
+      const wasProbe = item.probe;
+      item.probe = false;
+      if (wasProbe) breaker.probeInFlight = false;
+      item.attempts++;
+
+      const transientFailure = settings.outage || Math.random() < settings.transient;
+
+      if (!transientFailure) {
+        breaker.consecutive = 0;
+        if (wasProbe && breaker.state === 'half') breaker.state = 'closed';
+        if (item.bad) {
+          // The API is up and rejected the request (a 400 or 422): retrying will not help
+          park(item, 'bad');
+        } else {
+          delivered++;
+          moveAlong(item, [legs.apiToDelivered], 'deliver');
+        }
+        return;
+      }
+
+      breaker.consecutive++;
+      if (settings.breaker) {
+        if (breaker.state === 'half' && wasProbe) openBreaker();
+        else if (breaker.state === 'closed' && breaker.consecutive >= BREAKER_THRESHOLD) openBreaker();
+      }
+
+      if (item.attempts >= settings.maxAttempts) {
+        park(item, 'exhausted');
+        return;
+      }
+      item.nextAt = now + backoffDelay(item.attempts);
+      moveAlong(item, [legs.apiToRetry], 'queue');
+    }
+
+    function arrive(item: Item) {
+      switch (item.then) {
+        case 'queue':
+          item.phase = 'queued';
+          queue.push(item);
+          break;
+        case 'call':
+          item.phase = 'calling';
+          item.holdUntil = now + (settings.outage ? LATENCY_OUTAGE : LATENCY_OK);
+          calls.push(now);
+          break;
+        case 'deliver':
+          item.phase = 'fading';
+          item.fadeStart = now;
+          break;
+        case 'park':
+          item.phase = 'parked';
+          parked.push(item);
+          break;
+      }
+    }
+
+    function requeueParked() {
+      for (const item of parked) {
+        // An operator has fixed the cause, so the item gets a fresh retry budget
+        item.attempts = 0;
+        item.bad = false;
+        item.reason = null;
+        item.nextAt = 0;
+        const start = item.pos.clone().sub(item.jitter);
+        const path = new THREE.CatmullRomCurve3([start, ...curves.requeue.points.slice(1)]);
+        moveAlong(item, [leg(path)], 'queue');
+      }
+      parked = [];
+    }
+
+    function queueSlot(i: number, out: THREE.Vector3) {
+      i = Math.min(i, QUEUE_CAP - 1);
+      const layer = Math.floor(i / 30);
+      const r = i % 30;
+      return out.set(Q.x + ((r % 6) - 2.5) * SLOT, Q.y - 0.8 + layer * SLOT, Q.z + (Math.floor(r / 6) - 2) * SLOT);
+    }
+
+    function parkSlot(i: number, out: THREE.Vector3) {
+      i = Math.min(i, 269); // six layers; anything beyond overlaps the top layer
+      const layer = Math.floor(i / 45);
+      const r = i % 45;
+      return out.set(P.x + ((r % 9) - 4) * SLOT, P.y - 0.6 + layer * SLOT, P.z + (Math.floor(r / 9) - 2) * SLOT);
+    }
+
+    function step(dt: number) {
+      now += dt;
+
+      // Arrivals, unless the queue is full (back-pressure on the source)
+      held = queue.length >= QUEUE_CAP || items.length >= MAX_ITEMS;
+      if (held) spawnAcc = 0;
+      else {
+        spawnAcc += dt * settings.rate;
+        while (spawnAcc >= 1) {
+          spawnAcc -= 1;
+          spawn();
+        }
+      }
+
+      dispatch();
+
+      const ease = Math.min(1, dt * 8);
+      let anyDead = false;
+
+      for (const item of items) {
+        if (item.phase === 'moving') {
+          while (item.legs.length && now - item.legStart >= item.legs[0].dur) {
+            item.legStart += item.legs[0].dur;
+            item.legs.shift();
+          }
+          if (!item.legs.length) arrive(item);
+          else {
+            const l = item.legs[0];
+            l.curve.getPointAt((now - item.legStart) / l.dur, tmpVec);
+            item.pos.copy(tmpVec).add(item.jitter);
+          }
+        } else if (item.phase === 'calling') {
+          item.pos.copy(A).addScaledVector(item.jitter, 1.6);
+          if (now >= item.holdUntil) resolve(item);
+        } else if (item.phase === 'fading') {
+          item.pos.x += dt * 1.5;
+          if (now - item.fadeStart > 0.8) {
+            item.dead = true;
+            anyDead = true;
+          }
+        }
+      }
+
+      queue.forEach((item, i) => item.pos.lerp(queueSlot(i, tmpVec), ease));
+      parked.forEach((item, i) => item.pos.lerp(parkSlot(i, tmpVec), ease));
+
+      if (anyDead) items = items.filter((it) => !it.dead);
+      while (calls.length && calls[0] < now - 5) calls.shift();
+    }
+
+    function colourFor(item: Item, out: THREE.Color) {
+      if (item.phase === 'fading') return out.copy(C.done).lerp(C.bg, Math.min(1, (now - item.fadeStart) / 0.8));
+      if (item.then === 'deliver') return out.copy(C.done);
+      if (item.reason === 'bad') return out.copy(C.bad);
+      if (item.reason === 'exhausted') return out.copy(C.exhausted);
+      out.copy(item.attempts > 0 ? C.retry : C.fresh);
+      if (item.phase === 'queued' && item.nextAt > now) out.lerp(C.bg, 0.6);
+      return out;
+    }
+
+    function writeBuffers() {
+      const n = Math.min(items.length, MAX_ITEMS);
+      for (let i = 0; i < n; i++) {
+        const item = items[i];
+        positions[i * 3] = item.pos.x;
+        positions[i * 3 + 1] = item.pos.y;
+        positions[i * 3 + 2] = item.pos.z;
+        colourFor(item, tmpColor);
+        colors[i * 3] = tmpColor.r;
+        colors[i * 3 + 1] = tmpColor.g;
+        colors[i * 3 + 2] = tmpColor.b;
+      }
+      geometry.setDrawRange(0, n);
+      geometry.attributes.position.needsUpdate = true;
+      geometry.attributes.color.needsUpdate = true;
+    }
+
+    function updateScene() {
+      api.edgeMat.color.setHex(settings.outage ? 0xe8846f : EDGE);
+      api.faceMat.color.setHex(settings.outage ? 0xe8846f : EDGE);
+      api.faceMat.opacity = settings.outage ? 0.18 : 0.06;
+      ring.visible = settings.breaker;
+      if (settings.breaker) {
+        const c = breaker.state === 'open' ? 0xe8846f : breaker.state === 'half' ? 0xe2bd73 : 0x9ed39a;
+        (ring.material as THREE.MeshBasicMaterial).color.setHex(c);
+      }
+    }
+
+    // ---------- Stats (a few times a second, not every frame) ----------
+    function breakerText() {
+      if (!settings.breaker) return 'Off';
+      if (breaker.state === 'open') return `Open (${Math.max(0, breaker.openUntil - now).toFixed(1)} s)`;
+      if (breaker.state === 'half') return 'Half-open: testing';
+      return 'Closed';
+    }
+
+    function updateStats() {
+      const waiting = queue.filter((it) => it.nextAt > now).length;
+      const bad = parked.filter((it) => it.reason === 'bad').length;
+      stat('delivered').textContent = delivered.toLocaleString();
+      stat('queued').textContent = queue.length.toLocaleString();
+      stat('waiting').textContent = waiting ? `${waiting} waiting to retry` : '';
+      stat('inflight').textContent = `${inFlight} / ${CONCURRENCY}`;
+      stat('calls').textContent = (calls.length / Math.min(5, Math.max(now, 1))).toFixed(1);
+      stat('parked').textContent = parked.length.toLocaleString();
+      stat('parked-detail').textContent = parked.length ? `${bad} bad data, ${parked.length - bad} out of attempts` : '';
+      stat('breaker').textContent = breakerText();
+
+      queueLabel.textContent = `Queue · ${queue.length}`;
+      workerLabel.textContent = `Worker · ${inFlight}/${CONCURRENCY}`;
+      apiLabel.textContent = settings.outage ? 'External API · down' : 'External API';
+      deliveredLabel.textContent = `Delivered · ${delivered}`;
+      parkLabel.textContent = `Needs attention · ${parked.length}`;
+
+      let msg = '';
+      let cls = '';
+      if (held) {
+        msg = 'The queue is full, so the source is being held back until it drains.';
+        cls = 'warn';
+      } else if (settings.breaker && breaker.state === 'open') {
+        msg = 'The circuit breaker is open: no calls are made until it lets a test call through.';
+      } else if (paused) {
+        msg = 'Paused.';
+      }
+      if (statusEl.textContent !== msg) statusEl.textContent = msg;
+      statusEl.className = `tool-status ${cls}`;
+    }
+
+    // ---------- Controls ----------
+    const rangeFields = ['rate', 'transient', 'bad', 'maxAttempts'] as const;
+    const percent = new Set(['transient', 'bad']);
+    const outageBtn = q<HTMLButtonElement>('[data-action="outage"]');
+    const pauseBtn = q<HTMLButtonElement>('[data-action="pause"]');
+    let paused = false;
+
+    function formatOut(name: string, value: number) {
+      if (name === 'rate') return `${value} / s`;
+      if (percent.has(name)) return `${Math.round(value * 100)}%`;
+      return String(value);
+    }
+
+    function syncControls() {
+      for (const name of rangeFields) {
+        const input = q<HTMLInputElement>(`[data-field="${name}"]`);
+        const value = settings[name];
+        input.value = String(percent.has(name) ? Math.round(value * 100) : value);
+        q<HTMLOutputElement>(`[data-out="${name}"]`).textContent = formatOut(name, value);
+      }
+      q<HTMLSelectElement>('[data-field="backoff"]').value = settings.backoff;
+      q<HTMLInputElement>('[data-field="breaker"]').checked = settings.breaker;
+      outageBtn.setAttribute('aria-pressed', String(settings.outage));
+      outageBtn.textContent = settings.outage ? 'End API outage' : 'Start API outage';
+      updateScene();
+    }
+
+    for (const name of rangeFields) {
+      q<HTMLInputElement>(`[data-field="${name}"]`).addEventListener('input', (e) => {
+        const raw = Number((e.target as HTMLInputElement).value);
+        settings[name] = percent.has(name) ? raw / 100 : raw;
+        q<HTMLOutputElement>(`[data-out="${name}"]`).textContent = formatOut(name, settings[name]);
+      });
+    }
+
+    q<HTMLSelectElement>('[data-field="backoff"]').addEventListener('change', (e) => {
+      settings.backoff = (e.target as HTMLSelectElement).value as Backoff;
+      trackExperiment('pipeline-flow', `backoff:${settings.backoff}`);
+    });
+
+    q<HTMLInputElement>('[data-field="breaker"]').addEventListener('change', (e) => {
+      settings.breaker = (e.target as HTMLInputElement).checked;
+      breaker.state = 'closed';
+      breaker.consecutive = 0;
+      breaker.probeInFlight = false;
+      updateScene();
+      trackExperiment('pipeline-flow', settings.breaker ? 'breaker:on' : 'breaker:off');
+    });
+
+    outageBtn.addEventListener('click', () => {
+      settings.outage = !settings.outage;
+      syncControls();
+      trackExperiment('pipeline-flow', settings.outage ? 'outage:start' : 'outage:end');
+    });
+
+    q<HTMLButtonElement>('[data-action="requeue"]').addEventListener('click', () => {
+      requeueParked();
+      trackExperiment('pipeline-flow', 'requeue');
+    });
+
+    pauseBtn.addEventListener('click', () => {
+      paused = !paused;
+      pauseBtn.textContent = paused ? 'Resume' : 'Pause';
+      updateStats();
+    });
+
+    q<HTMLButtonElement>('[data-action="reset"]').addEventListener('click', () => {
+      resetSim();
+      trackExperiment('pipeline-flow', 'reset');
+    });
+
+    root.querySelectorAll<HTMLButtonElement>('[data-preset]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const name = btn.dataset.preset!;
+        Object.assign(settings, PRESETS[name]);
+        resetSim();
+        syncControls();
+        if (paused) pauseBtn.click();
+        trackExperiment('pipeline-flow', `preset:${name}`);
+      });
+    });
+
+    // ---------- Camera ----------
+    const target = new THREE.Vector3(1.2, -0.8, 0);
+    const HALF_W = 15.4;
+    const HALF_H = 7;
+    camera.position.set(0.18, 0.22, 1).normalize().add(target);
+
+    // Rotate-only controls on mouse and trackpad. On touch screens they would trap page scrolling.
+    let controls: OrbitControls | null = null;
+    if (window.matchMedia('(pointer: fine)').matches) {
+      controls = new OrbitControls(camera, canvas);
+      controls.target.copy(target);
+      controls.enableZoom = false;
+      controls.enablePan = false;
+      controls.enableDamping = true;
+      controls.minPolarAngle = 0.9;
+      controls.maxPolarAngle = 1.9;
+      controls.minAzimuthAngle = -0.9;
+      controls.maxAzimuthAngle = 0.9;
+      q<HTMLElement>('[data-pf="hint"]').hidden = false;
+    }
+
+    function fit() {
+      const w = stage.clientWidth;
+      const h = stage.clientHeight;
+      if (!w || !h) return;
+      camera.aspect = w / h;
+      camera.updateProjectionMatrix();
+      const t = Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
+      const dist = Math.max(HALF_W / (t * camera.aspect), HALF_H / t) * 1.03;
+      const dir = camera.position.clone().sub(target).normalize();
+      camera.position.copy(target).addScaledVector(dir, dist);
+      camera.lookAt(target);
+      controls?.update();
+      renderer.setSize(w, h, false);
+      labelRenderer.setSize(w, h);
+    }
+
+    new ResizeObserver(fit).observe(stage);
+    fit();
+
+    // ---------- Loop: runs only while the demo is on screen ----------
+    let last = performance.now();
+    let statsAt = 0;
+
+    function frame(t: number) {
+      const dt = Math.min(0.1, (t - last) / 1000);
+      last = t;
+      if (!paused) step(dt);
+      writeBuffers();
+      updateScene();
+      controls?.update();
+      renderer.render(scene, camera);
+      labelRenderer.render(scene, camera);
+      if (t - statsAt > 250) {
+        statsAt = t;
+        updateStats();
+      }
+    }
+
+    new IntersectionObserver(([entry]) => {
+      if (entry.isIntersecting) {
+        last = performance.now();
+        renderer.setAnimationLoop(frame);
+      } else {
+        renderer.setAnimationLoop(null);
+      }
+    }).observe(stage);
+
+    syncControls();
+    updateStats();
+  }
+
+  function dotTexture() {
+    const c = document.createElement('canvas');
+    c.width = c.height = 64;
+    const g = c.getContext('2d')!;
+    g.fillStyle = '#fff';
+    g.beginPath();
+    g.arc(32, 32, 30, 0, Math.PI * 2);
+    g.fill();
+    const tex = new THREE.CanvasTexture(c);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    return tex;
+  }
+</script>
+
+<style is:global>
+  .pipeline-flow {
+    margin: 2rem 0;
+  }
+
+  .pf-stage {
+    position: relative;
+    aspect-ratio: 16 / 10;
+    min-height: 340px;
+    overflow: hidden;
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-lg);
+    background: var(--surface-inverse);
+  }
+
+  .pf-stage canvas {
+    display: block;
+    width: 100%;
+    height: 100%;
+  }
+
+  .pf-labels {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+  }
+
+  .pf-label {
+    padding: 2px 7px;
+    border-radius: var(--radius-sm);
+    background: rgba(30, 37, 40, 0.75);
+    color: var(--syn-text);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    white-space: nowrap;
+  }
+
+  .pf-legend {
+    position: absolute;
+    top: 10px;
+    left: 12px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 12px;
+    max-width: calc(100% - 24px);
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    color: var(--syn-muted);
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    pointer-events: none;
+  }
+
+  /* .pipeline-flow prefix outranks the article's `.content li + li` spacing */
+  .pipeline-flow .pf-legend li {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    margin: 0;
+  }
+
+  .pf-legend span {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    background: var(--dot);
+  }
+
+  .pf-hint {
+    position: absolute;
+    right: 12px;
+    bottom: 8px;
+    margin: 0;
+    color: var(--syn-comment);
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    pointer-events: none;
+  }
+
+  .pf-stats {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 1px;
+    margin: 12px 0 0;
+    overflow: hidden;
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-lg);
+    background: var(--border-subtle);
+  }
+
+  .pf-stats > div {
+    padding: 10px 14px;
+    background: var(--surface-card);
+  }
+
+  .pf-stats dt {
+    color: var(--text-muted);
+    font-size: var(--fs-micro);
+    letter-spacing: var(--ls-micro);
+    text-transform: uppercase;
+  }
+
+  .pf-stats dd {
+    margin: 2px 0 0;
+    color: var(--text-strong);
+    font-family: var(--font-mono);
+    font-size: 18px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .pf-stats dd.pf-sub {
+    color: var(--text-muted);
+    font-size: 12px;
+  }
+
+  .pf-controls {
+    margin-top: 12px;
+  }
+
+  .pf-presets {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .pf-presets-label {
+    color: var(--text-muted);
+    font-size: var(--fs-micro);
+    letter-spacing: var(--ls-micro);
+    text-transform: uppercase;
+  }
+
+  .pf-label-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  .pf-label-row output {
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    font-weight: 400;
+  }
+
+  .pipeline-flow input[type='range'] {
+    width: 100%;
+    accent-color: var(--accent);
+  }
+
+  .pipeline-flow .tool label.pf-check {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    align-self: end;
+    font-weight: 500;
+  }
+
+  .pf-check input {
+    margin-top: 3px;
+    accent-color: var(--accent);
+  }
+
+  .pipeline-flow .tool button.primary[aria-pressed='true'] {
+    background: var(--red-500);
+  }
+
+  .pipeline-flow .tool button.primary[aria-pressed='true']:hover {
+    background: var(--red-600);
+  }
+
+  @media (max-width: 640px) {
+    .pf-stage {
+      aspect-ratio: auto;
+      height: 380px;
+    }
+
+    .pf-stats {
+      grid-template-columns: repeat(2, 1fr);
+    }
+
+    .pf-legend {
+      font-size: 10.5px;
+    }
+
+    .pf-label {
+      font-size: 10.5px;
+    }
+  }
+</style>

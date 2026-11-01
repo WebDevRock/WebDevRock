@@ -1,0 +1,211 @@
+---
+layout: ../../layouts/ContentLayout.astro
+title: "Retries, Backoff and Circuit Breakers, Visualised in Three.js"
+description: "An interactive Three.js simulation of an integration pipeline. Watch messages retry, back off, trip a circuit breaker and land in a needs-attention queue during an API outage."
+tags: [threejs, visualization, simulation, integrations, resilience]
+updated: "2026-11-01"
+---
+
+import PipelineFlowDemo from '../../components/PipelineFlowDemo.astro';
+
+## Overview
+
+Retry policies are usually explained with tables of delays. This experiment shows one running instead. Each particle is a message in an integration pipeline:
+
+1. A **source** produces messages at a steady rate.
+2. They wait in a **queue**.
+3. A **worker** takes them, up to twelve at a time, and calls an **external API**.
+4. Successful calls go on to **delivered**. Failed calls loop back to the queue to retry.
+5. Messages that cannot be delivered end up in **needs attention**, where a person can see them and requeue them.
+
+It is a visual companion to [Retry, Back Off, Give Up: Handling Unreliable External APIs](/patterns/handling-unreliable-external-apis). The pattern explains the policy. This page lets you break the API and watch the policy work.
+
+## Demo
+
+<PipelineFlowDemo />
+
+## Things to try
+
+Each scenario button resets the simulation, so the counts start from zero.
+
+### Healthy
+
+One call in ten fails with a transient error. Most of those succeed on the next attempt. You will see the occasional amber particle loop over the top and rejoin the queue. Almost nothing reaches needs attention.
+
+### Outage, retry at once
+
+The API is down and answers every call with a `503`. With no backoff, a failed message goes straight back into the queue and is picked up again at once. Amber particles loop continuously, and within about ten seconds all twelve worker slots are busy calling an API that can't answer. The first messages run out of attempts after about 15 seconds. From then on, the needs-attention bin gains roughly two messages a second, as fast as they arrive.
+
+This is the failure mode retry policies exist to prevent. A five-attempt budget spent in a few seconds protects against nothing longer than a few seconds.
+
+### Outage, with backoff
+
+Same outage, with exponential backoff and jitter. After each failure a message sits in the queue, dimmed, until its next attempt is due. The waits are 2, 4, 8 and 16 seconds, each with jitter. Nothing reaches needs attention for about 25 seconds, because each message's five attempts now span half a minute instead of a few seconds.
+
+Click **End API outage** within that window. The waiting messages drain and are delivered without anyone touching them. In a real system the same shape is stretched over minutes or hours, which is how backoff rides out a maintenance window.
+
+Backoff doesn't reduce the total number of calls: every message still makes up to five. Watch **API calls / s** settle at about the same rate as in the previous scenario. It spreads the calls out and buys time. Reducing the calls needs the next scenario.
+
+### Outage, backoff and breaker
+
+With the circuit breaker on, five failures in a row open it. The ring around the API turns red, and the worker stops calling it altogether. **API calls / s** drops to almost zero. After five seconds, the breaker lets a single test call through (half-open, amber). If that call fails, the breaker opens again. If it succeeds, normal processing resumes.
+
+While the breaker is open, messages wait in the queue instead of spending their attempts, so a 20-second outage loses nothing. End the outage and the queue drains within seconds of the next test call succeeding.
+
+### Bad data
+
+Fifteen percent of messages carry data the API rejects, such as a validation error. These are permanent failures. The API is up, the request is wrong, and retrying will not change the answer. They go straight to needs attention (purple) on the first attempt and don't retry.
+
+**Requeue needs attention** stands in for an operator fixing the cause. Each requeued item has its data corrected, gets a fresh retry budget, and travels back to the queue. New arrivals still carry bad data at the same rate, so the bin starts filling again.
+
+### Overload
+
+Set **Arrival rate** to 12 per second. The worker can only finish about eight calls a second, so the queue grows by a few messages every second. After a couple of minutes it reaches 400 items and the source is held back. This is <span class="jargon" data-tooltip="Slowing or stopping the producer when the consumer cannot keep up, instead of letting work pile up without limit">back-pressure</span>. Retries make overload worse: every retry takes a worker slot that a new message could have used.
+
+## How it works
+
+The demo is one Astro component with about 650 lines of script: a small discrete simulation, plus a Three.js scene that draws its state every frame.
+
+### One `Points` object for every message
+
+Each message is a single vertex in one `THREE.Points` object, not a mesh of its own. Positions and colours live in preallocated typed arrays that are rewritten every frame, so the scene is drawn with one draw call however many messages are in flight.
+
+```javascript
+const MAX_ITEMS = 5000;
+const positions = new Float32Array(MAX_ITEMS * 3);
+const colors = new Float32Array(MAX_ITEMS * 3);
+
+const geometry = new THREE.BufferGeometry();
+geometry.setAttribute('position',
+  new THREE.BufferAttribute(positions, 3).setUsage(THREE.DynamicDrawUsage));
+geometry.setAttribute('color',
+  new THREE.BufferAttribute(colors, 3).setUsage(THREE.DynamicDrawUsage));
+
+const points = new THREE.Points(geometry, new THREE.PointsMaterial({
+  size: 0.34,
+  vertexColors: true,
+  map: dotTexture(),   // a white circle drawn on a canvas
+  alphaTest: 0.5,      // cut the square sprite down to the circle
+}));
+points.frustumCulled = false; // positions change every frame
+```
+
+Each frame copies the live items into the buffers, sets `setDrawRange(0, count)`, and flags both attributes with `needsUpdate`. A delivered message fades out by blending its colour towards the background, so the material never needs transparency.
+
+### Pipes are curves
+
+Each pipe is a Three.js curve. A straight pipe is a `LineCurve3`. The retry loop over the top and the path down to needs attention are `CatmullRomCurve3` splines through a few control points. The same curve draws the dashed line and moves the particles along it.
+
+```javascript
+const apiToRetry = new THREE.CatmullRomCurve3([
+  v(7, 0.9, 0), v(6.4, 3, -1), v(3, 4.4, -2),
+  v(-2, 4.4, -2), v(-4.6, 3, -1), v(-5, 1.3, 0),
+]);
+
+// Travel time comes from the length, so every pipe moves at the same speed
+const leg = (curve) => ({ curve, dur: curve.getLength() / SPEED });
+
+// Each frame, for an item on a leg
+curve.getPointAt((now - item.legStart) / leg.dur, tmp);
+item.pos.copy(tmp).add(item.jitter);
+```
+
+`getPointAt` uses arc length, so particles move at a constant speed even where the control points are uneven. Each item also has a small random `jitter` offset, which spreads one-pixel lines of particles into a stream.
+
+The pipe from the queue to the worker is built for each dispatch. It starts from wherever the message sits in the queue, so a message doesn't jump to the pipe entrance when it is picked up.
+
+### Each message is a small state machine
+
+A message is always in one of five phases:
+
+| Phase | Meaning |
+| --- | --- |
+| `moving` | Following one or more legs; `then` says what happens on arrival |
+| `queued` | Waiting in the queue, possibly not due until `nextAt` |
+| `calling` | At the API, waiting for a response or a timeout |
+| `parked` | In needs attention |
+| `fading` | Delivered and disappearing |
+
+The interesting decisions all happen when a call resolves:
+
+```javascript
+function resolve(item) {
+  inFlight--;
+  item.attempts++;
+
+  const transientFailure = settings.outage || Math.random() < settings.transient;
+
+  if (!transientFailure) {
+    breaker.consecutive = 0;
+    if (item.bad) park(item, 'bad');           // 400/422: retrying won't help
+    else moveAlong(item, [legs.apiToDelivered], 'deliver');
+    return;
+  }
+
+  breaker.consecutive++;
+  if (breaker.state === 'closed' && breaker.consecutive >= BREAKER_THRESHOLD) openBreaker();
+
+  if (item.attempts >= settings.maxAttempts) {
+    park(item, 'exhausted');                   // out of retry budget
+    return;
+  }
+  item.nextAt = now + backoffDelay(item.attempts);
+  moveAlong(item, [legs.apiToRetry], 'queue');
+}
+```
+
+The worker takes the first queued message that is due (`nextAt <= now`), so messages waiting on backoff stay in the queue but don't block messages behind them. The worker stops when all twelve slots are busy or the circuit breaker refuses.
+
+### Backoff and the breaker
+
+The backoff is the same shape as in the [retry backoff calculator](/tools/retry-schedule): doubling from 2 seconds, capped at 32, with equal jitter so that a burst of failures doesn't retry in lockstep.
+
+```javascript
+function backoffDelay(attempts) {
+  const d = Math.min(32, 2 ** attempts);
+  return d / 2 + Math.random() * (d / 2);
+}
+```
+
+The trip back along the retry loop is quick. Any wait comes from the backoff, not from the animation.
+
+The breaker has three states. **Closed** lets every call through. **Open** lets none through until a cooldown passes. **Half-open** allows exactly one test call, whose result decides whether the breaker closes or opens again. A failed call that was already in flight when the breaker opened doesn't restart the cooldown, which is how most real implementations behave.
+
+### Queues as grids
+
+Queued and parked messages ease towards a slot in a 3D grid, ordered by their position in the array. When the worker takes a message from the middle of the queue, the ones behind it slide forward. That shuffle comes free from easing every item towards its slot index:
+
+```javascript
+queue.forEach((item, i) => item.pos.lerp(queueSlot(i, tmp), ease));
+```
+
+Once the queue holds more than about 150 items, the grid rises above the box, so a backlog is visible as a growing tower.
+
+### Labels and controls
+
+The station labels are HTML elements placed with `CSS2DRenderer`, so they stay crisp and readable at any zoom. The figures under the canvas are plain text that updates four times a second rather than every frame.
+
+Dragging rotates the view with `OrbitControls`, limited to a range of angles. Zoom and pan are off so the mouse wheel still scrolls the page. On touch screens the controls aren't attached at all, because they would capture swipes and stop the page from scrolling.
+
+## Performance notes
+
+- One draw call for every message. Thousands of points are no work for the GPU. The cost is the JavaScript loop that updates them, which is linear in the number of messages.
+- The animation loop only runs while the demo is on screen, using an `IntersectionObserver` with `renderer.setAnimationLoop`. `requestAnimationFrame` already pauses in background tabs.
+- Frame time is capped at 100 ms, so returning to the tab doesn't make the simulation leap forward.
+- `getPointAt` does a binary search over the curve's arc-length table for each moving item. For tens of thousands of particles, move the motion into a vertex shader and pass each particle's start time as an attribute.
+
+## What the model leaves out
+
+It is a teaching model, not a load test. Real pipelines also have:
+
+- per-run retry budgets that stop a whole run, as described in the [retry pattern](/patterns/handling-unreliable-external-apis#3-set-a-retry-budget)
+- `Retry-After` headers that override the computed delay
+- unknown outcomes, where a timeout may have created something. [Designing Integration Jobs That Are Safe to Rerun](/patterns/integration-jobs-safe-to-rerun) covers those.
+- validation before the call, which keeps bad data from reaching the API at all. See [Designing Integration Pipelines That Fail Safely](/patterns/integration-pipelines-fail-safely).
+
+## Related
+
+- [Retry, Back Off, Give Up: Handling Unreliable External APIs](/patterns/handling-unreliable-external-apis)
+- [Retry fetch with Exponential Backoff and Jitter](/snippets/ts-fetch-retry-backoff)
+- [Retry Backoff Schedule Calculator](/tools/retry-schedule)
+- [Why Status Tables Fail Operations Teams](/patterns/status-tables-fail-operations)
