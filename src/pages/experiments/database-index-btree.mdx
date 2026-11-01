@@ -1,0 +1,182 @@
+---
+layout: ../../layouts/ContentLayout.astro
+title: "How a Database Index Works: A B-Tree in 3D"
+description: "Watch SQL Server find customers by ID and by surname, page by page. An interactive Three.js model of a table, an index, key lookups and page splits."
+tags: [threejs, visualization, sql-server, performance]
+updated: "2026-11-01"
+---
+
+import BTreeIndexDemo from '../../components/BTreeIndexDemo.astro';
+
+## Overview
+
+A database doesn't read a table the way you read a spreadsheet. It stores rows on 8 KB **pages** and keeps those pages in a tree, sorted by a key. Finding a row is like finding a name in a phone book. You don't start at page one. You open it near the right letter and narrow down from there.
+
+This demo is a small `Customers` table with 40 rows and two trees of pages:
+
+- **The table itself**, sorted by `CustomerId`. In SQL Server, the primary key is usually the table's <span class="jargon" data-tooltip="The index that decides the order the rows themselves are stored in. A table can have only one.">clustered index</span>, so the rows are stored in ID order.
+- **An index on `Surname`**, a second, smaller tree sorted alphabetically. Like the index at the back of a book, each entry holds the surname and the customer's ID, which points back to the full row.
+
+Pick a scenario, click **Run**, and watch each page the query reads. Tick **Step by step** to go at your own pace.
+
+## Demo
+
+<BTreeIndexDemo />
+
+## The scenarios
+
+### 1. Find a customer by ID
+
+```sql
+SELECT * FROM Customers WHERE CustomerId = 1027;
+```
+
+The search starts at the **root page** at the top. Each line on it says which page holds which range of IDs: "from 1017 → page 12" means IDs from 1017 onwards, up to the next line's ID, are below page 12. The search follows one pointer per level until it reaches a **leaf page**, where the rows themselves are stored.
+
+It reads 3 of the table's 14 pages. That is one page per level, however many rows there are. The execution plan calls this a **Clustered Index Seek**.
+
+### 2. Find by surname, with no index
+
+```sql
+SELECT * FROM Customers WHERE Surname = 'Patel';
+```
+
+The table is sorted by ID, so the Patels could be on any page. Without an index on `Surname`, the only option is to read every page and check every row. That is a **Clustered Index Scan**. It can't stop at the first match either, because another Patel could be on a later page.
+
+### 3. Find by surname, with an index
+
+```sql
+CREATE INDEX IX_Customers_Surname ON Customers (Surname);
+
+SELECT * FROM Customers WHERE Surname = 'Patel';
+```
+
+Now the search goes down the surname index instead, to the point where the Patels start. The index entries only hold the surname and the ID. To return the city and the other columns, each match needs a second search, down the table by ID. The execution plan shows this as an **Index Seek** followed by a **Key Lookup**, and the demo draws a line from each index entry to the table.
+
+On a 40-row table this saves nothing: the index route and a full scan both read about 10 pages. That's real: for a small table, SQL Server may choose to scan rather than use the index. The **Imagine the table holds** setting shows the same query at a realistic size. With a million customers, the index finds the Patels in about 3 pages and then reads about 3 more for each matching row. A scan would read over 33,000 pages.
+
+Notice that customers with the same surname are sorted by ID: the index pages show "Patel 1003" before "Patel 1015". SQL Server adds the table's key to the entries of an index that allows duplicates, so every entry is unique and points to exactly one row.
+
+### 4. Surnames starting with a letter
+
+```sql
+SELECT * FROM Customers WHERE Surname LIKE 'B%';
+```
+
+Because the index is in alphabetical order, every surname beginning with B is in one place. The search finds the first one, then follows the links between leaf pages until the surnames move past B. This is a range scan within the index. The same applies to `BETWEEN` on a date or to `ORDER BY` on an indexed column: the rows are already in order.
+
+Each match still needs a key lookup. With five matches, that's 15 table pages, more than the whole table. On a real table, when a query matches many rows, SQL Server may decide a scan is cheaper than thousands of lookups. If a query runs often, the fix is to make the index *cover* it: store every column the query uses in the index, so the table isn't touched at all. That means selecting only the columns you need rather than `*`, and adding them to the index with `INCLUDE`:
+
+```sql
+CREATE INDEX IX_Customers_Surname ON Customers (Surname) INCLUDE (FirstName, City);
+
+SELECT CustomerId, FirstName, Surname, City
+FROM Customers
+WHERE Surname LIKE 'B%';
+```
+
+`CustomerId` doesn't need including: as the table's clustered index key, it's already in every entry of the index.
+
+### 5. A new customer signs up
+
+```sql
+INSERT INTO Customers (FirstName, Surname, City) VALUES ('Layla', 'Adams', 'Salford');
+```
+
+An insert writes to the table and to every index on it.
+
+- **In the table**, the new customer gets the next ID, so the row always goes on the last page. Microsoft's [index design guide](https://learn.microsoft.com/sql/relational-databases/sql-server-index-design-guide) describes an ever-increasing key this way: "data is always added on the last page of the index", so pages in the middle never split. In the demo, when the last page is full, a new page is added at the end and the full page is left as it is, so the table's pages stay 100% full.
+- **In the surname index**, the entry has to go wherever the surname belongs alphabetically, which could be anywhere. When that page is full, it **splits**: about half its entries move to a new page (it flashes purple), and both pages are left partly empty. Sometimes the page above is full too and splits as well. A split in the middle of an index costs extra work, and it can cause fragmentation, which makes large scans less efficient.
+
+Click **Sign up 5 at random** a few times and compare the two figures under the demo: the table's leaf pages stay 100% full, while the index's hover around three-quarters. A table keyed on a random value, such as a `uniqueidentifier` filled with `NEWID()`, behaves like the surname index. Rows land all over the table, pages in the middle split, and space goes unused.
+
+## The real-world numbers
+
+The demo keeps pages tiny, with 4 rows per table page and 6 entries per index page, so that you can read them. Real 8 KB pages hold far more. The "Imagine the table holds" figures assume:
+
+- about 30 customer rows per table page (rows of roughly 250 bytes)
+- about 250 entries per surname index page (a surname and an ID)
+- about 500 pointers per page in the levels above the leaves
+
+These are rough figures, but the shape is what matters. A scan grows in step with the table: twice the rows, twice the pages. A seek grows by one page each time the table gets about 500 times bigger. With these assumptions, a seek reads 3 pages at a million customers and 4 at a hundred million.
+
+## In SQL Server
+
+To see how many pages a query reads, turn on I/O statistics before running it:
+
+```sql
+SET STATISTICS IO ON;
+
+SELECT * FROM Customers WHERE CustomerId = 1027;
+-- Table 'Customers'. Scan count 0, logical reads 3, ...
+```
+
+The **logical reads** figure is the demo's page count. The execution plan (Ctrl+M in SSMS before running) shows the same operators as the narration: Clustered Index Seek, Clustered Index Scan, Index Seek and Key Lookup.
+
+To see how deep an index is and how full its pages are:
+
+```sql
+SELECT i.name AS index_name,
+       s.index_depth,
+       s.page_count,
+       s.avg_page_space_used_in_percent
+FROM sys.dm_db_index_physical_stats(
+       DB_ID(), OBJECT_ID('dbo.Customers'), NULL, NULL, 'SAMPLED') AS s
+JOIN sys.indexes AS i
+  ON i.object_id = s.object_id
+ AND i.index_id = s.index_id
+WHERE s.index_level = 0;
+```
+
+`index_depth` is the number of pages a single-row seek reads. `avg_page_space_used_in_percent` matches the demo's "Leaf pages full". The `LIMITED` mode is faster but leaves that column empty.
+
+Indexes speed up reads and slow down writes. Every insert, update or delete has to maintain every index on the table. That's a good reason to index the columns your queries actually search on, rather than every column. For big changes to large tables, see [Changing Large Volumes of Production Data Without an Outage](/patterns/large-data-changes-without-outage).
+
+## How the demo is built
+
+### The trees
+
+Both trees are the same small `BPlusTree` class. A page is a sorted list of keys, with either child pages (above the leaves) or a link to the next leaf page. The table's keys are customer IDs. The index's keys are `"Surname#CustomerId"` strings, which sort by surname and then by ID, matching how SQL Server keys an index that allows duplicates.
+
+```javascript
+// Which pointer to follow: keys equal to a pointer's start go to its page
+childIndex(page, key) {
+  let i = 0;
+  while (i < page.keys.length && key >= page.keys[i]) i++;
+  return i;
+}
+
+// The pages a seek reads: one per level, from the root to a leaf
+path(key) {
+  const path = [this.root];
+  let page = this.root;
+  while (!page.leaf) {
+    page = page.children[this.childIndex(page, key)];
+    path.push(page);
+  }
+  return path;
+}
+```
+
+A search for every Patel looks for the key `"Patel#"`. That sorts just before `"Patel#1003"`, so the search lands on the first Patel even though it doesn't know the ID. Inserting splits a full page in half. An insert past the last key instead starts a new page and leaves the full one alone. That is how the demo models an ever-increasing key, and it's the behaviour scenario 5 shows in the table.
+
+### The pages
+
+Each page is a thin 3D card whose front is drawn on a `<canvas>` and used as a texture: a header with the page number, then one line per row or pointer. When a page is read or a row matches, the canvas is redrawn and the texture updated. Real text on the pages, rather than labels floating in front of them, means it stays attached to the page as it moves and as the view rotates.
+
+### Following the query
+
+Each scenario is an `async` function that reads pages one at a time, with a pause after each. Normally the pause is a timer. In step-by-step mode it waits for the **Next step** button instead. The same code drives both, which keeps the narration and the animation in step. While a query runs, the camera follows the page being read, close enough to read its rows. Afterwards, it pulls back to show the whole tree.
+
+## What the demo leaves out
+
+- **Deletes and updates.** Deleting rows leaves free space on pages, which later inserts can reuse. Reorganising an index (`ALTER INDEX ... REORGANIZE`) compacts pages back together, and rebuilding it rewrites them from scratch.
+- **Fill factor.** When an index is built or rebuilt, it can deliberately leave free space on each leaf page so that later inserts don't split pages straight away.
+- **Heaps.** A table without a clustered index stores rows in no particular order. Lookups from an index then use a row's physical location instead of its key.
+- **The query optimiser.** The demo always does what the scenario says. SQL Server chooses between a seek and a scan using statistics about the data, which is why the same query can get a different plan on a bigger table.
+
+## Related
+
+- [Changing Large Volumes of Production Data Without an Outage](/patterns/large-data-changes-without-outage)
+- [SQL Server: Update or Delete Millions of Rows in Batches](/snippets/sql-batch-update-delete)
+- [Stopping Duplicates at the Source Instead of Cleaning Them Up](/patterns/stop-duplicates-at-source)

@@ -1,0 +1,1770 @@
+---
+// How a database index works, shown on a Customers table: the table's clustered index on
+// CustomerId and a nonclustered index on Surname, as 3D trees of pages. Each scenario runs a
+// real query and narrates every page it reads.
+import '../styles/tools.css';
+---
+
+<div class="idx-demo" data-pagefind-ignore>
+  <div class="idx-stage" data-idx="stage">
+    <canvas
+      data-idx="canvas"
+      role="img"
+      aria-label="3D view of database pages. The Customers table is a tree of pages ordered by CustomerId, and the index on Surname is a second tree ordered alphabetically. The narration below describes each page as it is read."
+    ></canvas>
+    <ul class="idx-legend" aria-hidden="true">
+      <li><span style="--dot: #E2BD73"></span>Reading now</li>
+      <li><span style="--dot: #8FCBBE"></span>Already read</li>
+      <li><span style="--dot: #9ED39A"></span>Matching row</li>
+      <li><span style="--dot: #C9B4DC"></span>New page from a split</li>
+    </ul>
+    <p class="idx-hint" data-idx="hint" hidden>Drag to rotate</p>
+  </div>
+
+  <div class="idx-narration" data-idx="narration" aria-live="polite">Choose a scenario below and click Run.</div>
+
+  <div class="tool idx-panel">
+    <div class="idx-scenarios" role="group" aria-label="Scenario">
+      <button type="button" data-scenario="id" aria-pressed="true"><span>1</span> Find a customer by ID</button>
+      <button type="button" data-scenario="scan" aria-pressed="false"><span>2</span> Find by surname, no index</button>
+      <button type="button" data-scenario="index" aria-pressed="false"><span>3</span> Find by surname, with an index</button>
+      <button type="button" data-scenario="prefix" aria-pressed="false"><span>4</span> Surnames starting with…</button>
+      <button type="button" data-scenario="signup" aria-pressed="false"><span>5</span> A new customer signs up</button>
+    </div>
+
+    <p class="idx-intro" data-idx="intro"></p>
+
+    <pre class="idx-sql"><code data-idx="sql"></code></pre>
+
+    <div class="idx-row">
+      <label class="idx-field" data-for="id">
+        CustomerId
+        <input type="number" data-field="id" min="1001" max="1099" step="1" value="1027" />
+      </label>
+      <label class="idx-field" data-for="scan index">
+        Surname
+        <select data-field="surname"></select>
+      </label>
+      <label class="idx-field" data-for="prefix">
+        First letter
+        <select data-field="letter"></select>
+      </label>
+      <label class="idx-field" data-for="signup">
+        First name
+        <input type="text" data-field="first" maxlength="12" />
+      </label>
+      <label class="idx-field" data-for="signup">
+        Surname
+        <input type="text" data-field="newSurname" maxlength="12" />
+      </label>
+      <label class="idx-field" data-for="signup">
+        City
+        <input type="text" data-field="city" maxlength="12" />
+      </label>
+    </div>
+
+    <div class="idx-row">
+      <button type="button" class="primary" data-action="run">Run</button>
+      <button type="button" data-action="signup5" data-for="signup">Sign up 5 at random</button>
+      <label class="idx-check">
+        <input type="checkbox" data-field="step" />
+        Step by step
+      </label>
+      <button type="button" data-action="next" disabled>Next step</button>
+      <label class="idx-field">
+        Speed
+        <select data-field="speed">
+          <option value="0.6">Slow</option>
+          <option value="1" selected>Normal</option>
+          <option value="2.2">Fast</option>
+        </select>
+      </label>
+      <button type="button" data-action="reset">Reset data</button>
+    </div>
+
+    <p class="tool-status" data-idx="status" aria-live="polite"></p>
+  </div>
+
+  <div class="idx-results" data-idx="results" hidden>
+    <h3 class="idx-results-title">Result</h3>
+    <p class="idx-summary" data-idx="summary"></p>
+    <div class="idx-table-wrap">
+      <table class="idx-table" data-idx="rows">
+        <thead>
+          <tr><th scope="col">CustomerId</th><th scope="col">Name</th><th scope="col">City</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <p class="idx-scale">
+      <label>
+        Imagine the table holds
+        <select data-field="scale">
+          <option value="10000">10,000 customers</option>
+          <option value="1000000" selected>1 million customers</option>
+          <option value="100000000">100 million customers</option>
+        </select>
+      </label>
+      <span data-idx="scale"></span>
+    </p>
+    <details class="idx-steps-wrap">
+      <summary>Every step of this run</summary>
+      <ol class="idx-steps" data-idx="steps"></ol>
+    </details>
+  </div>
+
+  <dl class="idx-stats">
+    <div><dt>Customers</dt><dd data-stat="customers">40</dd></div>
+    <div><dt>Table pages</dt><dd data-stat="tablePages">–</dd><dd class="idx-sub" data-stat="tableFill"></dd></div>
+    <div><dt>Surname index pages</dt><dd data-stat="indexPages">–</dd><dd class="idx-sub" data-stat="indexFill"></dd></div>
+  </dl>
+</div>
+
+<script>
+  import * as THREE from 'three';
+  import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+  import { trackExperiment } from '../scripts/analytics';
+
+  // ---------- Data ----------
+  interface Customer {
+    id: number;
+    first: string;
+    surname: string;
+    city: string;
+  }
+
+  const SEED: [string, string, string][] = [
+    ['Grace', 'Baker', 'Bristol'], ['Tom', 'Wilson', 'Leeds'], ['Amira', 'Patel', 'Leicester'],
+    ['Sean', 'Murphy', 'Belfast'], ['Chloe', 'Evans', 'Cardiff'], ['Ravi', 'Shah', 'London'],
+    ['Emma', 'Thompson', 'York'], ['Daniel', 'Brown', 'Manchester'], ['Fatima', 'Begum', 'Bradford'],
+    ['Lewis', 'Campbell', 'Glasgow'], ['Sophie', 'Hughes', 'Swansea'], ['Kwame', 'Mensah', 'London'],
+    ['Olivia', 'Smith', 'Norwich'], ['Jack', 'Robinson', 'Sheffield'], ['Priya', 'Patel', 'Birmingham'],
+    ['Callum', 'Fraser', 'Aberdeen'], ['Hannah', 'Wright', 'Oxford'], ['Marek', 'Nowak', 'Nottingham'],
+    ['Lucy', 'Bennett', 'Brighton'], ['Ethan', 'Clarke', 'Derby'], ['Aisha', 'Khan', 'Luton'],
+    ['Ryan', 'Doyle', 'Belfast'], ['Megan', 'Jones', 'Newport'], ['Oliver', 'Turner', 'Exeter'],
+    ['Zara', 'Ahmed', 'Leeds'], ['Harry', 'Walker', 'Hull'], ['Isla', 'Stewart', 'Edinburgh'],
+    ['James', 'Smith', 'Bolton'], ['Niamh', 'Kelly', 'Belfast'], ['Ben', 'Cooper', 'Reading'],
+    ['Mia', 'Bailey', 'Plymouth'], ['Adam', 'Lewis', 'Wrexham'], ['Ella', 'Morgan', 'Bath'],
+    ['Samuel', 'Okafor', 'London'], ['Ruby', 'Mitchell', 'Dundee'], ['Noah', 'Harris', 'Coventry'],
+    ['Freya', 'Davies', 'Cardiff'], ['Leo', 'Green', 'Cambridge'], ['Jessica', 'Ward', 'Stoke'],
+    ['Mohammed', 'Ali', 'Bradford'],
+  ];
+  const FIRST_POOL = ['Alfie', 'Ava', 'Dylan', 'Erin', 'Finn', 'Holly', 'Imran', 'Jade', 'Kai', 'Layla', 'Mason', 'Nina', 'Oscar', 'Poppy', 'Rhys', 'Sara', 'Theo', 'Yusuf'];
+  const SURNAME_POOL = ['Adams', 'Barker', 'Carter', 'Dixon', 'Ellis', 'Foster', 'Gill', 'Hall', 'Iqbal', 'Jackson', 'Kaur', 'Lowe', 'Mills', 'Nash', 'Owen', 'Price', 'Quinn', 'Reid', 'Singh', 'Taylor', 'Usman', 'Vaughan', 'Webb', 'Young'];
+  const CITY_POOL = ['Bath', 'Carlisle', 'Chester', 'Durham', 'Inverness', 'Lincoln', 'Perth', 'Preston', 'Salford', 'Truro', 'Wells', 'Worcester'];
+  const pick = <T,>(list: T[]) => list[Math.floor(Math.random() * list.length)];
+
+  // ---------- B+tree ----------
+  type Key = number | string;
+  interface Page {
+    no: number; // page number in the database file, shared by both trees
+    leaf: boolean;
+    keys: Key[];
+    children: Page[];
+    next: Page | null;
+  }
+
+  let pageCounter = 1;
+
+  class BPlusTree {
+    root: Page;
+    lastSplitAtEnd = false;
+    lastSplits = 0;
+
+    constructor(
+      public maxLeaf: number,
+      public maxInner: number
+    ) {
+      this.root = this.newPage(true);
+    }
+
+    private newPage(leaf: boolean): Page {
+      return { no: pageCounter++, leaf, keys: [], children: [], next: null };
+    }
+
+    childIndex(page: Page, key: Key) {
+      let i = 0;
+      while (i < page.keys.length && key >= page.keys[i]) i++;
+      return i;
+    }
+
+    path(key: Key): Page[] {
+      const path = [this.root];
+      let page = this.root;
+      while (!page.leaf) {
+        page = page.children[this.childIndex(page, key)];
+        path.push(page);
+      }
+      return path;
+    }
+
+    insert(key: Key) {
+      const path = this.path(key);
+      const leaf = path[path.length - 1];
+      let i = 0;
+      while (i < leaf.keys.length && leaf.keys[i] < key) i++;
+      leaf.keys.splice(i, 0, key);
+
+      // A key after every other key goes on a new page when the last page is full. With an ever-increasing
+      // key, every insert lands on the last page, so pages in the middle of the index never split.
+      let atEnd = leaf.next === null && i === leaf.keys.length - 1;
+      this.lastSplitAtEnd = false;
+      this.lastSplits = 0;
+
+      let page = leaf;
+      let level = path.length - 1;
+      while (page.keys.length > (page.leaf ? this.maxLeaf : this.maxInner)) {
+        this.lastSplits++;
+        const right = this.newPage(page.leaf);
+        let separator: Key;
+        if (page.leaf) {
+          right.keys = page.keys.splice(atEnd ? page.keys.length - 1 : Math.ceil(page.keys.length / 2));
+          right.next = page.next;
+          page.next = right;
+          separator = right.keys[0];
+          this.lastSplitAtEnd = atEnd;
+        } else if (atEnd) {
+          separator = page.keys.pop()!;
+          right.children = page.children.splice(page.children.length - 1);
+        } else {
+          const mid = Math.floor(page.keys.length / 2);
+          separator = page.keys[mid];
+          right.keys = page.keys.splice(mid + 1);
+          page.keys.pop();
+          right.children = page.children.splice(mid + 1);
+        }
+
+        if (level === 0) {
+          const root = this.newPage(false);
+          root.keys = [separator];
+          root.children = [page, right];
+          this.root = root;
+          break;
+        }
+        const parent = path[level - 1];
+        const at = parent.children.indexOf(page);
+        parent.keys.splice(at, 0, separator);
+        parent.children.splice(at + 1, 0, right);
+        atEnd = atEnd && at === parent.keys.length - 1;
+        page = parent;
+        level--;
+      }
+    }
+
+    levels(): Page[][] {
+      const levels: Page[][] = [];
+      let row = [this.root];
+      while (row.length) {
+        levels.push(row);
+        row = row.flatMap((p) => p.children);
+      }
+      return levels;
+    }
+
+    leaves(): Page[] {
+      const levels = this.levels();
+      return levels[levels.length - 1];
+    }
+  }
+
+  // Index keys are "Surname#CustomerId" so that two customers with the same surname have different keys
+  const indexKey = (c: Customer) => `${c.surname}#${c.id}`;
+  const keySurname = (k: Key) => String(k).split('#')[0];
+  const keyId = (k: Key) => Number(String(k).split('#')[1]);
+  // How a key reads on a page: an ID in the table, "Surname ID" in the index (sorted by surname, then ID)
+  const keyLabel = (tree: 'table' | 'index', k: Key) => (tree === 'table' ? String(k) : `${keySurname(k)} ${keyId(k)}`);
+
+  // ---------- Rough real-world estimates (see the article for the assumptions) ----------
+  const ROWS_PER_TABLE_PAGE = 30;
+  const ROWS_PER_INDEX_PAGE = 250;
+  const FAN_OUT = 500;
+  const depth = (pages: number) => (pages <= 1 ? 1 : 1 + Math.ceil(Math.log(pages) / Math.log(FAN_OUT)));
+  function estimate(n: number) {
+    const tablePages = Math.ceil(n / ROWS_PER_TABLE_PAGE);
+    const indexPages = Math.ceil(n / ROWS_PER_INDEX_PAGE);
+    return { scan: tablePages, tableSeek: depth(tablePages), indexSeek: depth(indexPages) };
+  }
+  const fmt = (n: number) => n.toLocaleString('en-GB');
+  const pagesWord = (n: number) => `${fmt(n)} page${n === 1 ? '' : 's'}`;
+
+  // ---------- Page cards ----------
+  const CARD_W = 4;
+  const TEX_W = 512;
+  const HEADER_H = 50;
+  const ROW_H = 50;
+  const TEX_PAD = 10;
+  const LEAF_GAP = 0.7;
+  const TREE_GAP = 9;
+  const SANS = '"Instrument Sans", system-ui, sans-serif';
+  const MONO = '"JetBrains Mono", ui-monospace, Consolas, monospace';
+  const BG = 0x1e2528;
+
+  type Highlight = 'none' | 'path' | 'current';
+  type RowState = 'reading' | 'match' | 'checked';
+  type TreeName = 'table' | 'index';
+
+  interface PageView {
+    mesh: THREE.Mesh;
+    canvas: HTMLCanvasElement;
+    ctx: CanvasRenderingContext2D;
+    texture: THREE.CanvasTexture;
+    outlineMat: THREE.LineBasicMaterial;
+    target: THREE.Vector3;
+    highlight: Highlight;
+    rows: Map<number, RowState>;
+    flash: number;
+    grow: number;
+    dirty: boolean;
+    cardH: number;
+  }
+
+  interface TreeView {
+    name: TreeName;
+    tree: BPlusTree;
+    group: THREE.Group;
+    views: Map<number, PageView>;
+    childLines: THREE.LineSegments;
+    leafLines: THREE.LineSegments;
+    title: THREE.Mesh;
+    titleText: string;
+    targetX: number;
+    span: number;
+    topY: number;
+    visible: boolean;
+  }
+
+  const root = document.querySelector<HTMLElement>('.idx-demo');
+  if (root) init(root);
+
+  function init(root: HTMLElement) {
+    const q = <T extends HTMLElement>(sel: string) => root.querySelector<T>(sel)!;
+    const stage = q<HTMLElement>('[data-idx="stage"]');
+    const canvas = q<HTMLCanvasElement>('[data-idx="canvas"]');
+    const narrationEl = q<HTMLElement>('[data-idx="narration"]');
+    const stepsEl = q<HTMLOListElement>('[data-idx="steps"]');
+    const resultsEl = q<HTMLElement>('[data-idx="results"]');
+    const summaryEl = q<HTMLElement>('[data-idx="summary"]');
+    const scaleEl = q<HTMLElement>('[data-idx="scale"]');
+    const rowsBody = q<HTMLTableSectionElement>('[data-idx="rows"] tbody');
+    const statusEl = q<HTMLElement>('[data-idx="status"]');
+    const runBtn = q<HTMLButtonElement>('[data-action="run"]');
+    const nextBtn = q<HTMLButtonElement>('[data-action="next"]');
+    const stat = (name: string) => q<HTMLElement>(`[data-stat="${name}"]`);
+
+    const customers = new Map<number, Customer>();
+
+    // ---------- Three.js ----------
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(40, 1, 0.1, 800);
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setClearColor(BG);
+    const maxAniso = renderer.capabilities.getMaxAnisotropy();
+
+    let controls: OrbitControls | null = null;
+    if (window.matchMedia('(pointer: fine)').matches) {
+      controls = new OrbitControls(camera, canvas);
+      controls.enableZoom = false; // the mouse wheel keeps scrolling the page
+      controls.enablePan = false;
+      controls.enableDamping = true;
+      controls.minPolarAngle = 1.05;
+      controls.maxPolarAngle = 1.75;
+      controls.minAzimuthAngle = -0.7;
+      controls.maxAzimuthAngle = 0.7;
+      q<HTMLElement>('[data-idx="hint"]').hidden = false;
+    }
+
+    const edgeMat = new THREE.MeshBasicMaterial({ color: 0xc9c3b6 });
+    const backMat = new THREE.MeshBasicMaterial({ color: 0xb8b2a5 });
+    const OUTLINE: Record<Highlight, number> = { none: 0x5c6461, path: 0x8fcbbe, current: 0xe2bd73 };
+
+    const rowCount = (tv: TreeView, page: Page) => (page.leaf ? tv.tree.maxLeaf : tv.tree.maxInner + 1);
+
+    function makeView(tv: TreeView, page: Page): PageView {
+      const rows = rowCount(tv, page);
+      const texH = HEADER_H + rows * ROW_H + TEX_PAD;
+      const cardH = (CARD_W * texH) / TEX_W;
+      const c = document.createElement('canvas');
+      c.width = TEX_W;
+      c.height = texH;
+      const texture = new THREE.CanvasTexture(c);
+      texture.colorSpace = THREE.SRGBColorSpace;
+      texture.anisotropy = maxAniso;
+      const face = new THREE.MeshBasicMaterial({ map: texture });
+      const geo = new THREE.BoxGeometry(CARD_W, cardH, 0.12);
+      const mesh = new THREE.Mesh(geo, [edgeMat, edgeMat, edgeMat, edgeMat, face, backMat]);
+      const outlineMat = new THREE.LineBasicMaterial({ color: OUTLINE.none });
+      const outline = new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(CARD_W + 0.12, cardH + 0.12, 0.2)), outlineMat);
+      mesh.add(outline);
+      tv.group.add(mesh);
+      return {
+        mesh,
+        canvas: c,
+        ctx: c.getContext('2d')!,
+        texture,
+        outlineMat,
+        target: new THREE.Vector3(),
+        highlight: 'none',
+        rows: new Map(),
+        flash: 0,
+        grow: 1,
+        dirty: true,
+        cardH,
+      };
+    }
+
+    function disposeView(tv: TreeView, v: PageView) {
+      tv.group.remove(v.mesh);
+      v.mesh.geometry.dispose();
+      v.texture.dispose();
+      v.outlineMat.dispose();
+    }
+
+    function fitText(g: CanvasRenderingContext2D, text: string, maxW: number) {
+      if (g.measureText(text).width <= maxW) return text;
+      let t = text;
+      while (t.length > 1 && g.measureText(`${t}…`).width > maxW) t = t.slice(0, -1);
+      return `${t}…`;
+    }
+
+    // Draw a page as a sheet of paper: a coloured header, then one line per row or pointer
+    function drawPage(tv: TreeView, page: Page, v: PageView) {
+      const g = v.ctx;
+      const rows = rowCount(tv, page);
+      const h = v.canvas.height;
+      g.fillStyle = '#F4F1EA';
+      g.fillRect(0, 0, TEX_W, h);
+
+      const role = page === tv.tree.root ? (page.leaf ? 'root and leaf page' : 'root page') : page.leaf ? 'leaf page' : 'intermediate page';
+      const headerBg =
+        v.highlight === 'current' ? '#E2BD73' : v.highlight === 'path' ? '#8FCBBE' : tv.name === 'table' ? '#1F6F6A' : '#2F5F8A';
+      const headerFg = v.highlight === 'none' ? '#F4F1EA' : '#1E2528';
+      g.fillStyle = headerBg;
+      g.fillRect(0, 0, TEX_W, HEADER_H);
+      g.fillStyle = headerFg;
+      g.textBaseline = 'middle';
+      g.font = `700 27px ${SANS}`;
+      g.textAlign = 'left';
+      g.fillText(`Page ${page.no}`, 16, HEADER_H / 2 + 1);
+      g.font = `500 21px ${SANS}`;
+      g.textAlign = 'right';
+      g.fillText(role, TEX_W - 16, HEADER_H / 2 + 1);
+
+      for (let i = 0; i < rows; i++) {
+        const y = HEADER_H + i * ROW_H;
+        const state = v.rows.get(i);
+        if (state) {
+          g.fillStyle = state === 'match' ? '#BFE3BC' : state === 'reading' ? '#F3D995' : '#E4E0D6';
+          g.fillRect(0, y, TEX_W, ROW_H);
+        }
+        if (i > 0) {
+          g.fillStyle = '#DDD8CC';
+          g.fillRect(12, y, TEX_W - 24, 1);
+        }
+        const mid = y + ROW_H / 2 + 1;
+
+        if (page.leaf) {
+          const key = page.keys[i];
+          if (key === undefined) {
+            g.fillStyle = '#ADA79A';
+            g.font = `italic 400 22px ${SANS}`;
+            g.textAlign = 'left';
+            g.fillText('free space', 16, mid);
+            continue;
+          }
+          if (tv.name === 'table') {
+            const c = customers.get(key as number)!;
+            g.fillStyle = '#1E2528';
+            g.font = `600 24px ${MONO}`;
+            g.textAlign = 'left';
+            g.fillText(String(c.id), 14, mid);
+            g.font = `500 25px ${SANS}`;
+            g.fillText(fitText(g, `${c.first} ${c.surname}`, 250), 96, mid);
+            g.fillStyle = '#5C6461';
+            g.font = `400 22px ${SANS}`;
+            g.textAlign = 'right';
+            g.fillText(fitText(g, c.city, 140), TEX_W - 14, mid);
+          } else {
+            g.fillStyle = '#1E2528';
+            g.font = `600 26px ${SANS}`;
+            g.textAlign = 'left';
+            g.fillText(keySurname(key), 16, mid);
+            g.fillStyle = '#5C6461';
+            g.font = `500 22px ${MONO}`;
+            g.textAlign = 'right';
+            g.fillText(`→ row ${keyId(key)}`, TEX_W - 16, mid);
+          }
+        } else {
+          const child = page.children[i];
+          if (!child) continue;
+          const from = i === 0 ? 'from the start' : `from ${keyLabel(tv.name, page.keys[i - 1])}`;
+          g.fillStyle = '#1E2528';
+          g.font = `500 25px ${SANS}`;
+          g.textAlign = 'left';
+          g.fillText(from, 16, mid);
+          g.fillStyle = '#5C6461';
+          g.font = `500 22px ${MONO}`;
+          g.textAlign = 'right';
+          g.fillText(`→ page ${child.no}`, TEX_W - 16, mid);
+        }
+      }
+      v.texture.needsUpdate = true;
+      v.dirty = false;
+    }
+
+    // ---------- Trees ----------
+    function lineSet(color: number, opacity: number, parent: THREE.Object3D, max = 300) {
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(max * 6), 3).setUsage(THREE.DynamicDrawUsage));
+      const lines = new THREE.LineSegments(geo, new THREE.LineBasicMaterial({ color, transparent: true, opacity }));
+      lines.frustumCulled = false;
+      parent.add(lines);
+      return lines;
+    }
+
+    function makeTitle(text: string) {
+      const c = document.createElement('canvas');
+      c.width = 1024;
+      c.height = 112;
+      const g = c.getContext('2d')!;
+      g.fillStyle = '#EAE6DD';
+      g.font = `600 50px ${SANS}`;
+      g.textAlign = 'center';
+      g.textBaseline = 'middle';
+      g.fillText(text, 512, 58);
+      const tex = new THREE.CanvasTexture(c);
+      tex.colorSpace = THREE.SRGBColorSpace;
+      const mesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 112 / 1024), new THREE.MeshBasicMaterial({ map: tex, transparent: true }));
+      return mesh;
+    }
+
+    function makeTree(name: TreeName, tree: BPlusTree, titleText: string): TreeView {
+      const group = new THREE.Group();
+      scene.add(group);
+      const title = makeTitle(titleText);
+      group.add(title);
+      return {
+        name,
+        tree,
+        group,
+        views: new Map(),
+        childLines: lineSet(0x7f8786, 0.85, group),
+        leafLines: lineSet(0xe2bd73, 0.6, group),
+        title,
+        titleText,
+        targetX: 0,
+        span: 0,
+        topY: 0,
+        visible: true,
+      };
+    }
+
+    let table: TreeView;
+    let index: TreeView;
+
+    function layoutTree(tv: TreeView) {
+      const levels = tv.tree.levels();
+      const height = levels.length;
+      const leaves = levels[height - 1];
+      tv.span = leaves.length * (CARD_W + LEAF_GAP) - LEAF_GAP;
+      const seen = new Set<number>();
+      const fresh = new Set<PageView>();
+
+      const viewFor = (p: Page) => {
+        seen.add(p.no);
+        let v = tv.views.get(p.no);
+        if (!v) {
+          v = makeView(tv, p);
+          tv.views.set(p.no, v);
+          fresh.add(v);
+        }
+        v.dirty = true;
+        return v;
+      };
+
+      // Pages sit with their tops aligned on each level; leaves at the bottom
+      const tallest = Math.max(...[...leaves, tv.tree.root].map((p) => (CARD_W * (HEADER_H + rowCount(tv, p) * ROW_H + TEX_PAD)) / TEX_W));
+      const step = tallest + 2.6;
+      leaves.forEach((p, i) => {
+        const v = viewFor(p);
+        v.target.set(-tv.span / 2 + CARD_W / 2 + i * (CARD_W + LEAF_GAP), -v.cardH / 2, 0);
+      });
+      for (let l = height - 2; l >= 0; l--) {
+        for (const p of levels[l]) {
+          const first = tv.views.get(p.children[0].no)!.target.x;
+          const last = tv.views.get(p.children[p.children.length - 1].no)!.target.x;
+          const v = viewFor(p);
+          v.target.set((first + last) / 2, (height - 1 - l) * step - v.cardH / 2, 0);
+        }
+      }
+      tv.topY = (height - 1) * step;
+
+      for (const [no, v] of tv.views) {
+        if (!seen.has(no)) {
+          disposeView(tv, v);
+          tv.views.delete(no);
+        } else if (fresh.has(v)) {
+          v.mesh.position.copy(v.target);
+        }
+      }
+
+      const titleW = Math.max(14, Math.min(tv.span * 0.75, 30));
+      tv.title.scale.set(titleW, titleW, 1);
+      tv.title.position.set(0, tv.topY + 1.2 + (titleW * 112) / 1024 / 2, 0);
+    }
+
+    function positionTrees() {
+      table.group.visible = table.visible;
+      index.group.visible = index.visible;
+      if (table.visible && index.visible) {
+        index.targetX = -(index.span / 2 + TREE_GAP / 2);
+        table.targetX = table.span / 2 + TREE_GAP / 2;
+      } else {
+        table.targetX = 0;
+        index.targetX = 0;
+      }
+    }
+
+    function layoutAll() {
+      layoutTree(table);
+      layoutTree(index);
+      positionTrees();
+    }
+
+    function buildData() {
+      for (const tv of [table, index].filter(Boolean)) {
+        for (const v of tv.views.values()) disposeView(tv, v);
+        tv.views.clear();
+        scene.remove(tv.group);
+      }
+      customers.clear();
+      pageCounter = 1;
+      const tableTree = new BPlusTree(4, 3);
+      const indexTree = new BPlusTree(6, 3);
+      SEED.forEach(([first, surname, city], i) => {
+        const c = { id: 1001 + i, first, surname, city };
+        customers.set(c.id, c);
+        // Rows arrive in CustomerId order, as they would with an IDENTITY column
+        tableTree.insert(c.id);
+        indexTree.insert(indexKey(c));
+      });
+      table = makeTree('table', tableTree, 'Customers table: pages in CustomerId order');
+      index = makeTree('index', indexTree, 'Index on Surname: pages in alphabetical order');
+      layoutAll();
+      for (const tv of [table, index]) tv.group.position.x = tv.targetX;
+      updateStats();
+      fillSurnameOptions();
+    }
+
+    // ---------- Lines between pages ----------
+    const tmpA = new THREE.Vector3();
+    function updateLines(tv: TreeView) {
+      const childArr = tv.childLines.geometry.attributes.position.array as Float32Array;
+      const leafArr = tv.leafLines.geometry.attributes.position.array as Float32Array;
+      let c = 0;
+      let l = 0;
+      for (const level of tv.tree.levels()) {
+        for (const p of level) {
+          const pv = tv.views.get(p.no);
+          if (!pv) continue;
+          const pos = pv.mesh.position;
+          if (!p.leaf) {
+            const n = p.children.length;
+            p.children.forEach((child, i) => {
+              const cv = tv.views.get(child.no);
+              if (!cv || c >= 300) return;
+              const cp = cv.mesh.position;
+              const x = pos.x - CARD_W / 2 + ((i + 0.5) / n) * CARD_W;
+              childArr.set([x, pos.y - pv.cardH / 2, pos.z, cp.x, cp.y + cv.cardH / 2, cp.z], c * 6);
+              c++;
+            });
+          } else if (p.next && l < 300) {
+            const nv = tv.views.get(p.next.no);
+            if (nv) {
+              const np = nv.mesh.position;
+              leafArr.set([pos.x + CARD_W / 2, pos.y, pos.z, np.x - CARD_W / 2, np.y, np.z], l * 6);
+              l++;
+            }
+          }
+        }
+      }
+      tv.childLines.geometry.setDrawRange(0, c * 2);
+      tv.leafLines.geometry.setDrawRange(0, l * 2);
+      tv.childLines.geometry.attributes.position.needsUpdate = true;
+      tv.leafLines.geometry.attributes.position.needsUpdate = true;
+    }
+
+    // A glowing line for a key lookup: from an index entry to the table's root page
+    const beamGeo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]);
+    const beam = new THREE.Line(beamGeo, new THREE.LineBasicMaterial({ color: 0x9ed39a }));
+    beam.frustumCulled = false;
+    beam.visible = false;
+    scene.add(beam);
+    let beamFrom: { tv: TreeView; page: number; row: number } | null = null;
+
+    function rowWorld(tv: TreeView, pageNo: number, row: number, out: THREE.Vector3) {
+      const v = tv.views.get(pageNo);
+      if (!v) return out.set(0, 0, 0);
+      v.mesh.getWorldPosition(out);
+      out.x += CARD_W / 2;
+      out.y += v.cardH / 2 - ((HEADER_H + (row + 0.5) * ROW_H) / TEX_W) * CARD_W;
+      return out;
+    }
+
+    function updateBeam() {
+      if (!beamFrom) {
+        beam.visible = false;
+        return;
+      }
+      const arr = beamGeo.attributes.position.array as Float32Array;
+      rowWorld(beamFrom.tv, beamFrom.page, beamFrom.row, tmpA);
+      arr[0] = tmpA.x;
+      arr[1] = tmpA.y;
+      arr[2] = tmpA.z + 0.2;
+      const rv = table.views.get(table.tree.root.no)!;
+      rv.mesh.getWorldPosition(tmpA);
+      arr[3] = tmpA.x;
+      arr[4] = tmpA.y + rv.cardH / 2;
+      arr[5] = tmpA.z + 0.2;
+      beamGeo.attributes.position.needsUpdate = true;
+      beam.visible = true;
+    }
+
+    // ---------- Camera ----------
+    const camCenter = new THREE.Vector3();
+    const camGoal = new THREE.Vector3();
+    let camW = 30;
+    let camH = 15;
+    let camGoalW = 30;
+    let camGoalH = 15;
+    let focus: { tv: TreeView; page: number } | null = null;
+    let viewDir = new THREE.Vector3(0, 0.12, 1).normalize();
+
+    function homeGoal() {
+      let minX = Infinity;
+      let maxX = -Infinity;
+      let minY = Infinity;
+      let maxY = -Infinity;
+      for (const tv of [table, index]) {
+        if (!tv.visible) continue;
+        minX = Math.min(minX, tv.targetX - tv.span / 2);
+        maxX = Math.max(maxX, tv.targetX + tv.span / 2);
+        const tallestLeaf = Math.max(...[...tv.views.values()].map((v) => v.cardH));
+        minY = Math.min(minY, -tallestLeaf);
+        maxY = Math.max(maxY, tv.topY + 3);
+      }
+      camGoal.set((minX + maxX) / 2, (minY + maxY) / 2, 0);
+      camGoalW = (maxX - minX) * 1.06 + 2;
+      camGoalH = (maxY - minY) * 1.1 + 1;
+    }
+
+    function updateCamera(dt: number) {
+      const fv = focus ? focus.tv.views.get(focus.page) : undefined;
+      if (focus && fv) {
+        fv.mesh.getWorldPosition(camGoal);
+        camGoalW = 11;
+        camGoalH = 8;
+      } else {
+        homeGoal();
+      }
+      const k = 1 - Math.exp(-dt * 3.2 * Math.max(1, speed));
+      camCenter.lerp(camGoal, k);
+      camW += (camGoalW - camW) * k;
+      camH += (camGoalH - camH) * k;
+      if (controls) {
+        const d = camera.position.clone().sub(controls.target);
+        if (d.lengthSq() > 1e-6) viewDir = d.normalize();
+      }
+      const t = Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
+      const dist = Math.max(camW / 2 / (t * camera.aspect), camH / 2 / t);
+      camera.position.copy(camCenter).addScaledVector(viewDir, dist);
+      if (controls) controls.target.copy(camCenter);
+      camera.lookAt(camCenter);
+    }
+
+    // ---------- Running a scenario ----------
+    let speed = 1;
+    let stepMode = false;
+    let running = false;
+    let stepResolve: (() => void) | null = null;
+    const STEP = 1700;
+
+    const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms / speed));
+
+    function pause(ms = STEP) {
+      if (!stepMode) return sleep(ms);
+      nextBtn.disabled = false;
+      nextBtn.focus({ preventScroll: true });
+      return new Promise<void>((resolve) => {
+        stepResolve = () => {
+          stepResolve = null;
+          nextBtn.disabled = true;
+          resolve();
+        };
+      });
+    }
+
+    function say(text: string) {
+      narrationEl.textContent = text;
+      const li = document.createElement('li');
+      li.textContent = text;
+      stepsEl.append(li);
+    }
+
+    function clearMarks() {
+      for (const tv of [table, index]) {
+        for (const v of tv.views.values()) {
+          if (v.highlight !== 'none' || v.rows.size) {
+            v.highlight = 'none';
+            v.rows.clear();
+            v.dirty = true;
+          }
+        }
+      }
+      beamFrom = null;
+    }
+
+    let reads = { table: 0, index: 0 };
+
+    function setCurrent(tv: TreeView, page: Page) {
+      for (const t of [table, index]) {
+        for (const v of t.views.values()) {
+          if (v.highlight === 'current') {
+            v.highlight = 'path';
+            v.dirty = true;
+          }
+        }
+      }
+      const v = tv.views.get(page.no)!;
+      v.highlight = 'current';
+      v.dirty = true;
+      focus = { tv, page: page.no };
+      reads[tv.name]++;
+    }
+
+    function markRow(tv: TreeView, page: Page, row: number, state: RowState) {
+      const v = tv.views.get(page.no);
+      if (!v) return;
+      v.rows.set(row, state);
+      v.dirty = true;
+    }
+
+    const label = (tv: TreeView, key: Key) => keyLabel(tv.name, key);
+
+    // Read pages from the root down to a leaf, explaining each choice
+    // subject describes what is being looked for, e.g. "1027" or "the start of the Patel entries"
+    async function descend(tv: TreeView, key: Key, subject: string, pace = 1) {
+      const path = tv.tree.path(key);
+      const shown = subject[0].toUpperCase() + subject.slice(1);
+      for (const page of path) {
+        setCurrent(tv, page);
+        if (page.leaf) break;
+        const i = tv.tree.childIndex(page, key);
+        markRow(tv, page, i, 'reading');
+        const child = page.children[i];
+        const where =
+          i === 0
+            ? `${shown} comes before ${label(tv, page.keys[0])}`
+            : i === page.keys.length
+              ? `${shown} is at or after ${label(tv, page.keys[i - 1])}`
+              : `${shown} falls between ${label(tv, page.keys[i - 1])} and ${label(tv, page.keys[i])}`;
+        const intro = page === tv.tree.root ? `Page ${page.no} is the root page, where every search of this ${tv.name === 'table' ? 'table' : 'index'} starts.` : `Page ${page.no} is an intermediate page.`;
+        say(`${intro} ${where}, so it points to page ${child.no}.`);
+        await pause(STEP * pace);
+      }
+      return path;
+    }
+
+    function showResults(rows: Customer[], summary: string, scale: (n: number) => string) {
+      rowsBody.replaceChildren(
+        ...rows.map((c) => {
+          const tr = document.createElement('tr');
+          for (const text of [String(c.id), `${c.first} ${c.surname}`, c.city]) {
+            const td = document.createElement('td');
+            td.textContent = text;
+            tr.append(td);
+          }
+          return tr;
+        })
+      );
+      if (!rows.length) {
+        const tr = document.createElement('tr');
+        const td = document.createElement('td');
+        td.colSpan = 3;
+        td.textContent = 'No rows';
+        tr.append(td);
+        rowsBody.append(tr);
+      }
+      summaryEl.textContent = summary;
+      currentScale = scale;
+      updateScale();
+      resultsEl.hidden = false;
+    }
+
+    let currentScale: ((n: number) => string) | null = null;
+    function updateScale() {
+      const n = Number(q<HTMLSelectElement>('[data-field="scale"]').value);
+      scaleEl.textContent = currentScale ? currentScale(n) : '';
+    }
+
+    // Scenario 1: a clustered index seek
+    async function runSeekId(id: number) {
+      say(`Looking for customer ${id}. The table's pages are kept in CustomerId order, so SQL Server can go straight down the tree to the right page.`);
+      await pause(STEP * 0.8);
+      const path = await descend(table, id, String(id));
+      const leaf = path[path.length - 1];
+      const row = leaf.keys.indexOf(id);
+      const c = customers.get(id);
+      if (row >= 0 && c) {
+        markRow(table, leaf, row, 'match');
+        say(`Page ${leaf.no} is a leaf page: it holds the customer rows themselves. Customer ${id} is here: ${c.first} ${c.surname}, ${c.city}. That took ${pagesWord(path.length)}, one per level of the tree.`);
+      } else {
+        say(`Page ${leaf.no} is the leaf page where customer ${id} would be, and it isn't there, so there is no such customer. SQL Server knows that after reading ${pagesWord(path.length)}.`);
+      }
+      await pause(STEP);
+      const scan = table.tree.leaves().length;
+      showResults(
+        c ? [c] : [],
+        `Read ${pagesWord(path.length)}. The execution plan calls this a Clustered Index Seek. Reading the whole table instead would take ${pagesWord(scan)}.`,
+        (n) => {
+          const e = estimate(n);
+          return `With ${fmt(n)} customers, this seek would read about ${pagesWord(e.tableSeek)}. Reading the whole table would take about ${pagesWord(e.scan)}.`;
+        }
+      );
+    }
+
+    // Scenario 2: no index on Surname, so read every row
+    async function runScan(surname: string) {
+      say(`Looking for customers called ${surname}. The table is in CustomerId order, and there's no index on Surname, so the ${surname}s could be on any page. SQL Server has to read every page and check every row.`);
+      await pause(STEP);
+      const found: Customer[] = [];
+      let checked = 0;
+      for (const leaf of table.tree.leaves()) {
+        setCurrent(table, leaf);
+        let here = 0;
+        leaf.keys.forEach((k, i) => {
+          const c = customers.get(k as number)!;
+          checked++;
+          if (c.surname === surname) {
+            found.push(c);
+            here++;
+            markRow(table, leaf, i, 'match');
+          } else {
+            markRow(table, leaf, i, 'checked');
+          }
+        });
+        say(`Page ${leaf.no}: checked ${leaf.keys.length} rows${here ? `, found ${here} called ${surname}` : ', no match'}.`);
+        await pause(STEP * 0.45);
+      }
+      const pages = table.tree.leaves().length;
+      say(`Done: read all ${pagesWord(pages)} and checked ${checked} rows to find ${found.length}. Even after finding a match, it has to keep going, because another ${surname} could be on any later page.`);
+      await pause(STEP);
+      showResults(found, `Read all ${pagesWord(pages)} and checked ${checked} rows. The execution plan calls this a Clustered Index Scan.`, (n) => {
+        const e = estimate(n);
+        return `With ${fmt(n)} customers, this would read about ${pagesWord(e.scan)} every time it runs. Scenario 3 shows how an index avoids that.`;
+      });
+    }
+
+    // Read along the index's leaf pages from a starting point, collecting matching entries
+    async function walkIndex(startPath: Page[], matches: (k: Key) => boolean, beyond: (k: Key) => boolean, what: string) {
+      const hits: { page: Page; row: number; key: Key }[] = [];
+      let leaf: Page | null = startPath[startPath.length - 1];
+      let first = true;
+      const entries = (n: number) => `${n} ${what} entr${n === 1 ? 'y' : 'ies'}`;
+      while (leaf) {
+        if (!first) setCurrent(index, leaf);
+        let here = 0;
+        leaf.keys.forEach((k, i) => {
+          if (matches(k)) {
+            hits.push({ page: leaf!, row: i, key: k });
+            markRow(index, leaf!, i, 'match');
+            here++;
+          }
+        });
+        const lastKey = leaf.keys[leaf.keys.length - 1];
+        const done = lastKey === undefined || beyond(lastKey) || !leaf.next;
+        let text: string;
+        if (first) {
+          text = `Page ${leaf.no} is a leaf page of the index. `;
+          if (here) text += `It has ${entries(here)}, each with the customer's ID.${done ? '' : ' They reach the end of the page, so there could be more on the next one.'}`;
+          else if (!done) text += `${what} entries would come after the last one here, so check the start of the next page.`;
+          else text += `There are no ${what} entries where they would be, so there are none.`;
+        } else {
+          text = `Following the link to the next leaf page, page ${leaf.no}: `;
+          text += here ? `${entries(here)}${done ? '.' : ', and still more could follow.'}` : `no more ${what} entries, so the search stops here.`;
+        }
+        say(text);
+        await pause(first ? STEP : STEP * 0.8);
+        first = false;
+        if (done) break;
+        leaf = leaf.next;
+      }
+      return hits;
+    }
+
+    // Each index entry only has the surname and ID, so fetch the full row from the table
+    async function lookups(hits: { page: Page; row: number; key: Key }[]) {
+      const rows: Customer[] = [];
+      for (const [n, hit] of hits.entries()) {
+        const id = keyId(hit.key);
+        beamFrom = { tv: index, page: hit.page.no, row: hit.row };
+        say(
+          n === 0
+            ? `The index entry gives the surname and customer ${id}, but not the city or anything else. To get the whole row, SQL Server uses the ID to look it up in the table. This is a Key Lookup.`
+            : `Key Lookup for customer ${id}.`
+        );
+        await pause(STEP * (n === 0 ? 1 : 0.5));
+        const path = await descend(table, id, String(id), n === 0 ? 0.8 : 0.35);
+        const leaf = path[path.length - 1];
+        markRow(table, leaf, leaf.keys.indexOf(id), 'match');
+        const c = customers.get(id)!;
+        rows.push(c);
+        say(`Page ${leaf.no} holds the row: ${c.first} ${c.surname}, ${c.city}.`);
+        await pause(STEP * (n === 0 ? 1 : 0.5));
+      }
+      beamFrom = null;
+      return rows;
+    }
+
+    // Scenario 3: index seek on Surname, then key lookups
+    async function runIndex(surname: string) {
+      say(`Looking for customers called ${surname}, this time with an index on Surname. Like the index at the back of a book, it lists every surname in alphabetical order, with the customer's ID to find the full row. Customers with the same surname are sorted by ID, so the search heads for the point just before the first ${surname}.`);
+      await pause(STEP);
+      const path = await descend(index, `${surname}#`, `the start of the ${surname} entries`);
+      const hits = await walkIndex(path, (k) => keySurname(k) === surname, (k) => keySurname(k) > surname, surname);
+      const indexReads = reads.index;
+      if (!hits.length) {
+        say(`There are no customers called ${surname}. The index proved that after reading ${pagesWord(indexReads)}.`);
+        await pause(STEP);
+        showResults([], `Read ${pagesWord(indexReads)} of the index. The execution plan calls this an Index Seek.`, (n) => {
+          const e = estimate(n);
+          return `With ${fmt(n)} customers, the index would answer this in about ${pagesWord(e.indexSeek)}, against about ${pagesWord(e.scan)} for a scan.`;
+        });
+        return;
+      }
+      const rows = await lookups(hits);
+      const total = reads.index + reads.table;
+      const scan = table.tree.leaves().length;
+      say(`Found ${rows.length} customer${rows.length === 1 ? '' : 's'} called ${surname}, reading ${pagesWord(reads.index)} of the index and ${pagesWord(reads.table)} of the table.`);
+      await pause(STEP);
+      showResults(
+        rows,
+        `Read ${pagesWord(total)}: ${reads.index} in the index and ${reads.table} in the table. The execution plan shows an Index Seek and a Key Lookup. ${
+          total > scan
+            ? `Scanning this small table would read only ${pagesWord(scan)}, fewer than going through the index. That's why SQL Server may choose to scan a small table instead. The picture changes as the table grows:`
+            : total === scan
+              ? `Scanning this small table also reads ${pagesWord(scan)}, so the index saves nothing here. That's why SQL Server may choose to scan a small table instead. The picture changes as the table grows:`
+              : `A scan of this small table reads ${pagesWord(scan)}. The difference grows with the table:`
+        }`,
+        (n) => {
+          const e = estimate(n);
+          return `With ${fmt(n)} customers, about ${pagesWord(e.indexSeek)} to search the index, plus about ${pagesWord(e.tableSeek)} for each matching customer's row, against about ${pagesWord(e.scan)} for a scan.`;
+        }
+      );
+    }
+
+    // Scenario 4: a range in the index
+    async function runPrefix(letter: string) {
+      say(`Looking for every surname starting with ${letter}. In alphabetical order, they all sit together, so SQL Server finds the first one and reads along until the surnames stop starting with ${letter}.`);
+      await pause(STEP);
+      const path = await descend(index, letter, `the start of the surnames beginning with ${letter}`);
+      const hits = await walkIndex(
+        path,
+        (k) => keySurname(k).startsWith(letter),
+        (k) => keySurname(k) > letter && !keySurname(k).startsWith(letter),
+        `${letter} surname`
+      );
+      if (!hits.length) {
+        say(`No surnames start with ${letter}.`);
+        await pause(STEP);
+        showResults([], `Read ${pagesWord(reads.index)} of the index.`, () => '');
+        return;
+      }
+      const rows = await lookups(hits);
+      say(`Found ${rows.length} customers. The index pages for ${letter} were read in one short run, then each row was fetched from the table.`);
+      await pause(STEP);
+      showResults(
+        rows,
+        `Read ${pagesWord(reads.index + reads.table)}: ${reads.index} in the index and ${reads.table} in the table, for ${rows.length} rows. With many matches, the lookups add up: SQL Server may decide a scan is cheaper, or you can add the other columns to the index so no lookups are needed.`,
+        (n) => {
+          const e = estimate(n);
+          return `With ${fmt(n)} customers, finding where the ${letter}s start takes about ${pagesWord(e.indexSeek)}. Each matching row then costs about ${pagesWord(e.tableSeek)} more to look up.`;
+        }
+      );
+    }
+
+    // Scenario 5: inserting a row updates the table and the index
+    async function runSignup(first: string, surname: string, city: string, pace = 1) {
+      const id = Math.max(...customers.keys()) + 1;
+      const c = { id, first, surname, city };
+      customers.set(id, c);
+
+      say(`${first} ${surname} signs up and gets the next CustomerId, ${id}. IDs only ever go up, so the new row belongs after every existing row: on the table's last page.`);
+      await pause(STEP * pace);
+      const tPath = await descend(table, id, String(id), 0.5 * pace);
+      const tLeaf = tPath[tPath.length - 1];
+      const tableBefore = new Set(table.views.keys());
+      table.tree.insert(id);
+      layoutTree(table);
+      const tableNew = flashNew(table, tableBefore);
+      if (table.tree.lastSplits) {
+        say(`Page ${tLeaf.no} was full. The new row goes after every existing row, so a new page (page ${tableNew[0]}) is added at the end and the full page is left as it is. With ascending IDs, every insert happens on the last page, so pages in the middle of the table never split.`);
+      } else {
+        say(`Page ${tLeaf.no} had free space, so the row goes there.`);
+      }
+      markInserted(table, id);
+      await pause(STEP * pace);
+
+      say(`The index on Surname must stay in alphabetical order, so the entry for ${surname} goes wherever ${surname} belongs alphabetically, not at the end.`);
+      await pause(STEP * 0.8 * pace);
+      const key = indexKey(c);
+      const iPath = await descend(index, key, `${surname} ${id}`, 0.5 * pace);
+      const iLeaf = iPath[iPath.length - 1];
+      const indexBefore = new Set(index.views.keys());
+      index.tree.insert(key);
+      layoutTree(index);
+      const indexNew = flashNew(index, indexBefore);
+      if (index.tree.lastSplits && !index.tree.lastSplitAtEnd) {
+        say(`Page ${iLeaf.no} was full, so it splits: half its entries move to a new page (page ${indexNew[0]}), and both pages are left with free space. This is a page split. It costs extra work now, and leaves the index taking up more pages than it needs.${index.tree.lastSplits > 1 ? ' The page above was full too, so it split as well.' : ''}`);
+      } else if (index.tree.lastSplits) {
+        say(`Page ${iLeaf.no} was full, and ${surname} comes after every other surname, so the entry goes on a new page (page ${indexNew[0]}).`);
+      } else {
+        say(`Page ${iLeaf.no} had free space, so the entry goes there.`);
+      }
+      markInserted(index, key);
+      positionTrees();
+      updateStats();
+      fillSurnameOptions();
+      await pause(STEP * pace);
+      return c;
+    }
+
+    function flashNew(tv: TreeView, before: Set<number>) {
+      const created: number[] = [];
+      for (const [no, v] of tv.views) {
+        if (!before.has(no)) {
+          v.flash = 1;
+          v.grow = 0;
+          created.push(no);
+        }
+      }
+      return created;
+    }
+
+    function markInserted(tv: TreeView, key: Key) {
+      for (const leaf of tv.tree.leaves()) {
+        const i = leaf.keys.indexOf(key);
+        if (i >= 0) markRow(tv, leaf, i, 'match');
+      }
+    }
+
+    // ---------- Scenario selection ----------
+    type Scenario = 'id' | 'scan' | 'index' | 'prefix' | 'signup';
+    let scenario: Scenario = 'id';
+
+    const INTRO: Record<Scenario, string> = {
+      id: 'In SQL Server, the primary key is usually the clustered index: the rows themselves are stored in CustomerId order, in a tree of pages. Finding one customer means going down that tree, not reading the whole table.',
+      scan: 'There is no index on Surname, so the table can only be read in CustomerId order. Searching by surname means reading every row.',
+      index: 'An index on Surname keeps a second, much smaller copy of the data in alphabetical order, each entry pointing back to its row in the table.',
+      prefix: 'A search for a range of values, such as every surname starting with one letter, finds the first match and then reads along the index in order.',
+      signup: 'Inserting a row writes to the table and to every index on it. Watch where the new row and the new index entry go, and when a full page has to split.',
+    };
+
+    function sqlFor(s: Scenario) {
+      const v = (name: string) => q<HTMLInputElement | HTMLSelectElement>(`[data-field="${name}"]`).value;
+      switch (s) {
+        case 'id':
+          return `SELECT * FROM Customers\nWHERE CustomerId = ${v('id') || '…'};`;
+        case 'scan':
+          return `-- No index on Surname\nSELECT * FROM Customers\nWHERE Surname = '${v('surname')}';`;
+        case 'index':
+          return `CREATE INDEX IX_Customers_Surname ON Customers (Surname);\n\nSELECT * FROM Customers\nWHERE Surname = '${v('surname')}';`;
+        case 'prefix':
+          return `SELECT * FROM Customers\nWHERE Surname LIKE '${v('letter')}%';`;
+        case 'signup':
+          return `INSERT INTO Customers (FirstName, Surname, City)\nVALUES ('${v('first')}', '${v('newSurname')}', '${v('city')}');`;
+      }
+    }
+
+    function updateSql() {
+      q('[data-idx="sql"]').textContent = sqlFor(scenario);
+    }
+
+    function selectScenario(s: Scenario) {
+      scenario = s;
+      root.querySelectorAll<HTMLButtonElement>('[data-scenario]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.scenario === s)));
+      root.querySelectorAll<HTMLElement>('[data-for]').forEach((el) => {
+        el.hidden = !el.dataset.for!.split(' ').includes(s);
+      });
+      q('[data-idx="intro"]').textContent = INTRO[s];
+      index.visible = s !== 'id' && s !== 'scan';
+      positionTrees();
+      if (!running) {
+        clearMarks();
+        focus = null;
+        narrationEl.textContent = 'Click Run to watch the query, one page at a time.';
+      }
+      updateSql();
+    }
+
+    function fillSurnameOptions() {
+      const select = q<HTMLSelectElement>('[data-field="surname"]');
+      const current = select.value || 'Patel';
+      const names = [...new Set([...customers.values()].map((c) => c.surname))].sort();
+      names.push('Zhang');
+      select.replaceChildren(
+        ...names.map((n) => {
+          const o = document.createElement('option');
+          o.value = n;
+          const count = [...customers.values()].filter((c) => c.surname === n).length;
+          o.textContent = count ? `${n}${count > 1 ? ` (${count} customers)` : ''}` : `${n} (no customers)`;
+          return o;
+        })
+      );
+      select.value = names.includes(current) ? current : 'Patel';
+    }
+
+    const letterSelect = q<HTMLSelectElement>('[data-field="letter"]');
+    letterSelect.replaceChildren(
+      ...'ABCDEFGHIJKLMNOPRSTWZ'.split('').map((l) => {
+        const o = document.createElement('option');
+        o.value = l;
+        o.textContent = l;
+        return o;
+      })
+    );
+    letterSelect.value = 'B';
+
+    function randomSignupFields() {
+      q<HTMLInputElement>('[data-field="first"]').value = pick(FIRST_POOL);
+      q<HTMLInputElement>('[data-field="newSurname"]').value = pick(SURNAME_POOL);
+      q<HTMLInputElement>('[data-field="city"]').value = pick(CITY_POOL);
+    }
+
+    function cleanName(value: string) {
+      const t = value.trim().replace(/[^A-Za-z -]/g, '');
+      return t ? t[0].toUpperCase() + t.slice(1) : '';
+    }
+
+    // ---------- Running ----------
+    const MAX_CUSTOMERS = 70;
+
+    async function run(task: () => Promise<void>) {
+      if (running) return;
+      running = true;
+      runBtn.disabled = true;
+      q<HTMLButtonElement>('[data-action="signup5"]').disabled = true;
+      stepsEl.replaceChildren();
+      resultsEl.hidden = true;
+      clearMarks();
+      reads = { table: 0, index: 0 };
+      try {
+        await task();
+      } catch (err) {
+        console.error(err);
+      } finally {
+        running = false;
+        runBtn.disabled = false;
+        q<HTMLButtonElement>('[data-action="signup5"]').disabled = false;
+        nextBtn.disabled = true;
+        window.setTimeout(() => {
+          if (!running) focus = null;
+        }, 2500 / speed);
+      }
+    }
+
+    function warn(text: string) {
+      statusEl.textContent = text;
+      statusEl.className = text ? 'tool-status warn' : 'tool-status';
+    }
+
+    runBtn.addEventListener('click', () => {
+      warn('');
+      if (scenario === 'id') {
+        const id = Number(q<HTMLInputElement>('[data-field="id"]').value);
+        if (!Number.isInteger(id) || id < 1) return warn('Enter a whole number, such as 1027.');
+        run(() => runSeekId(id));
+      } else if (scenario === 'scan') {
+        run(() => runScan(q<HTMLSelectElement>('[data-field="surname"]').value));
+      } else if (scenario === 'index') {
+        run(() => runIndex(q<HTMLSelectElement>('[data-field="surname"]').value));
+      } else if (scenario === 'prefix') {
+        run(() => runPrefix(letterSelect.value));
+      } else {
+        const first = cleanName(q<HTMLInputElement>('[data-field="first"]').value);
+        const surname = cleanName(q<HTMLInputElement>('[data-field="newSurname"]').value);
+        const city = cleanName(q<HTMLInputElement>('[data-field="city"]').value);
+        if (!first || !surname || !city) return warn('Enter a first name, surname and city, using letters only.');
+        if (customers.size >= MAX_CUSTOMERS) return warn(`The demo holds up to ${MAX_CUSTOMERS} customers. Click Reset data to start again.`);
+        run(async () => {
+          const c = await runSignup(first, surname, city);
+          showResults([c], `Inserting one row wrote to the table and to the index. Every extra index makes inserts a little slower, which is the price of faster searches.`, (n) => {
+            const e = estimate(n);
+            return `With ${fmt(n)} customers, finding the place for the new row takes about ${pagesWord(e.tableSeek)} in the table and ${pagesWord(e.indexSeek)} in the index.`;
+          });
+          updateSql();
+        });
+      }
+      trackExperiment('db-index', `run:${scenario}`);
+    });
+
+    q('[data-action="signup5"]').addEventListener('click', () => {
+      warn('');
+      if (customers.size + 5 > MAX_CUSTOMERS) return warn(`The demo holds up to ${MAX_CUSTOMERS} customers. Click Reset data to start again.`);
+      run(async () => {
+        const added: Customer[] = [];
+        for (let i = 0; i < 5; i++) {
+          added.push(await runSignup(pick(FIRST_POOL), pick(SURNAME_POOL), pick(CITY_POOL), 0.45));
+        }
+        showResults(added, `Five new customers. Their IDs all went at the end of the table, but their surnames landed all over the index. Compare how full the two sets of pages are, below.`, (n) => {
+          const e = estimate(n);
+          return `With ${fmt(n)} customers, each insert still takes about ${pagesWord(e.tableSeek)} in the table and ${pagesWord(e.indexSeek)} in the index to find its place.`;
+        });
+      });
+      trackExperiment('db-index', 'signup5');
+    });
+
+    nextBtn.addEventListener('click', () => stepResolve?.());
+
+    q<HTMLInputElement>('[data-field="step"]').addEventListener('change', (e) => {
+      stepMode = (e.target as HTMLInputElement).checked;
+      if (!stepMode) stepResolve?.();
+      trackExperiment('db-index', stepMode ? 'step:on' : 'step:off');
+    });
+
+    q<HTMLSelectElement>('[data-field="speed"]').addEventListener('change', (e) => {
+      speed = Number((e.target as HTMLSelectElement).value);
+    });
+
+    q<HTMLSelectElement>('[data-field="scale"]').addEventListener('change', updateScale);
+
+    q('[data-action="reset"]').addEventListener('click', () => {
+      if (running) return;
+      buildData();
+      selectScenario(scenario);
+      resultsEl.hidden = true;
+      narrationEl.textContent = 'Reset to the original 40 customers.';
+      trackExperiment('db-index', 'reset');
+    });
+
+    root.querySelectorAll<HTMLButtonElement>('[data-scenario]').forEach((b) =>
+      b.addEventListener('click', () => {
+        if (running) return;
+        selectScenario(b.dataset.scenario as Scenario);
+        resultsEl.hidden = true;
+        trackExperiment('db-index', `scenario:${b.dataset.scenario}`);
+      })
+    );
+
+    root.querySelectorAll<HTMLInputElement | HTMLSelectElement>('.idx-panel input, .idx-panel select').forEach((el) =>
+      el.addEventListener('input', updateSql)
+    );
+
+    // ---------- Stats ----------
+    function fill(tv: TreeView) {
+      const leaves = tv.tree.leaves();
+      const keys = leaves.reduce((n, p) => n + p.keys.length, 0);
+      return Math.round((keys / (leaves.length * tv.tree.maxLeaf)) * 100);
+    }
+
+    function updateStats() {
+      stat('customers').textContent = String(customers.size);
+      for (const tv of [table, index]) {
+        const levels = tv.tree.levels();
+        const pages = levels.reduce((n, l) => n + l.length, 0);
+        stat(tv.name === 'table' ? 'tablePages' : 'indexPages').textContent = `${pages} (${levels.length} levels)`;
+        stat(tv.name === 'table' ? 'tableFill' : 'indexFill').textContent = `Leaf pages ${fill(tv)}% full`;
+      }
+    }
+
+    // ---------- Render loop ----------
+    function fit() {
+      const w = stage.clientWidth;
+      const h = stage.clientHeight;
+      if (!w || !h) return;
+      camera.aspect = w / h;
+      camera.updateProjectionMatrix();
+      renderer.setSize(w, h, false);
+    }
+    new ResizeObserver(fit).observe(stage);
+    fit();
+
+    const outlineColor = new THREE.Color();
+    const flashColor = new THREE.Color(0xc9b4dc);
+    let last = performance.now();
+
+    function frame(t: number) {
+      const dt = Math.min(0.1, (t - last) / 1000);
+      last = t;
+      const k = 1 - Math.exp(-dt * 6);
+      for (const tv of [table, index]) {
+        tv.group.position.x += (tv.targetX - tv.group.position.x) * k;
+        let page: Page | undefined;
+        for (const level of tv.tree.levels()) {
+          for (page of level) {
+            const v = tv.views.get(page.no);
+            if (!v) continue;
+            if (v.dirty) drawPage(tv, page, v);
+            const lift = v.highlight === 'current' ? 0.8 : v.highlight === 'path' ? 0.35 : 0;
+            v.mesh.position.x += (v.target.x - v.mesh.position.x) * k;
+            v.mesh.position.y += (v.target.y - v.mesh.position.y) * k;
+            v.mesh.position.z += (v.target.z + lift - v.mesh.position.z) * k;
+            if (v.grow < 1) v.grow = Math.min(1, v.grow + dt * 2.5);
+            v.mesh.scale.setScalar(0.2 + 0.8 * v.grow);
+            if (v.flash > 0) v.flash = Math.max(0, v.flash - dt * 0.3);
+            outlineColor.setHex(OUTLINE[v.highlight]);
+            if (v.flash > 0 && v.highlight === 'none') outlineColor.lerp(flashColor, Math.min(1, v.flash * 1.5));
+            v.outlineMat.color.copy(outlineColor);
+          }
+        }
+        updateLines(tv);
+      }
+      updateBeam();
+      updateCamera(dt);
+      controls?.update();
+      renderer.render(scene, camera);
+    }
+
+    new IntersectionObserver(([entry]) => {
+      if (entry.isIntersecting) {
+        last = performance.now();
+        renderer.setAnimationLoop(frame);
+      } else {
+        renderer.setAnimationLoop(null);
+      }
+    }).observe(stage);
+
+    // ---------- Start ----------
+    buildData();
+    randomSignupFields();
+    selectScenario('id');
+    for (const tv of [table, index]) tv.group.position.x = tv.targetX;
+    narrationEl.textContent = 'Choose a scenario below and click Run.';
+    homeGoal();
+    camCenter.copy(camGoal);
+    camW = camGoalW;
+    camH = camGoalH;
+
+    // Canvas text uses the page's web fonts; redraw once they have loaded
+    document.fonts?.ready.then(() => {
+      for (const tv of [table, index]) for (const v of tv.views.values()) v.dirty = true;
+    });
+  }
+</script>
+
+<style is:global>
+  .idx-demo {
+    margin: 2rem 0;
+  }
+
+  .idx-stage {
+    position: relative;
+    aspect-ratio: 16 / 10;
+    overflow: hidden;
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+    background: var(--surface-inverse);
+  }
+
+  .idx-stage canvas {
+    display: block;
+    width: 100%;
+    height: 100%;
+  }
+
+  .idx-legend {
+    position: absolute;
+    top: 10px;
+    left: 12px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 12px;
+    max-width: calc(100% - 24px);
+    margin: 0;
+    padding: 5px 9px;
+    border-radius: var(--radius-sm);
+    background: rgba(30, 37, 40, 0.85);
+    list-style: none;
+    color: var(--syn-muted);
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    pointer-events: none;
+    z-index: 1;
+  }
+
+  /* .idx-demo prefix outranks the article's `.content li + li` spacing */
+  .idx-demo .idx-legend li {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    margin: 0;
+  }
+
+  .idx-legend span {
+    width: 10px;
+    height: 10px;
+    border-radius: 2px;
+    background: var(--dot);
+  }
+
+  .idx-hint {
+    position: absolute;
+    right: 12px;
+    bottom: 8px;
+    margin: 0;
+    color: var(--syn-comment);
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    pointer-events: none;
+  }
+
+  .idx-narration {
+    min-height: 4.6em;
+    padding: 12px 16px;
+    border: 1px solid var(--border-default);
+    border-top: 0;
+    border-radius: 0 0 var(--radius-lg) var(--radius-lg);
+    background: var(--surface-raised);
+    color: var(--text-strong);
+    font-size: 15.5px;
+    line-height: 1.5;
+  }
+
+  .idx-panel {
+    margin-top: 12px;
+  }
+
+  .idx-scenarios {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+    gap: 8px;
+  }
+
+  .idx-demo .tool .idx-scenarios button {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    text-align: left;
+    font-weight: 500;
+  }
+
+  .idx-scenarios button span {
+    display: inline-grid;
+    flex: none;
+    place-items: center;
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    background: var(--surface-sunken);
+    font-family: var(--font-mono);
+    font-size: 12px;
+  }
+
+  .idx-demo .tool .idx-scenarios button[aria-pressed='true'] {
+    border-color: var(--accent);
+    background: var(--accent-tint);
+    color: var(--text-strong);
+  }
+
+  .idx-scenarios button[aria-pressed='true'] span {
+    background: var(--accent);
+    color: var(--accent-on);
+  }
+
+  .idx-intro {
+    margin: 0;
+    color: var(--text-body);
+    font-size: var(--fs-small);
+  }
+
+  .idx-demo .idx-sql {
+    margin: 0;
+    padding: 12px 14px;
+    overflow-x: auto;
+    border-radius: var(--radius-md);
+    background: var(--surface-code);
+    color: var(--syn-text);
+    font-family: var(--font-mono);
+    font-size: 13.5px;
+    line-height: 1.55;
+    white-space: pre;
+  }
+
+  .idx-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    gap: 8px 10px;
+  }
+
+  .idx-demo .tool label.idx-field {
+    display: grid;
+    gap: 4px;
+    font-size: 13px;
+  }
+
+  .idx-demo .tool label.idx-field[hidden],
+  .idx-demo .tool button[hidden] {
+    display: none;
+  }
+
+  .idx-demo .idx-field input[type='number'] {
+    width: 7rem;
+  }
+
+  .idx-demo .idx-field input[type='text'] {
+    width: 9rem;
+  }
+
+  .idx-demo .idx-field select {
+    width: auto;
+  }
+
+  .idx-demo .tool label.idx-check {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 40px;
+    font-size: 14px;
+  }
+
+  .idx-check input {
+    accent-color: var(--accent);
+  }
+
+  .idx-demo .tool button:disabled {
+    cursor: default;
+    opacity: 0.5;
+  }
+
+  .idx-results {
+    margin-top: 12px;
+    padding: 16px 20px;
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-lg);
+    background: var(--surface-card);
+  }
+
+  .idx-demo .idx-results-title {
+    margin: 0 0 6px;
+    font-size: 16px;
+  }
+
+  .idx-demo .idx-summary {
+    margin: 0 0 10px;
+    font-size: var(--fs-small);
+  }
+
+  .idx-table-wrap {
+    overflow-x: auto;
+  }
+
+  .idx-demo .idx-table {
+    width: 100%;
+    margin: 0;
+    border-collapse: collapse;
+    font-size: 14px;
+  }
+
+  .idx-demo .idx-table th,
+  .idx-demo .idx-table td {
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--border-subtle);
+    text-align: left;
+  }
+
+  .idx-demo .idx-table td:first-child {
+    font-family: var(--font-mono);
+  }
+
+  .idx-demo .idx-scale {
+    display: grid;
+    gap: 6px;
+    margin: 12px 0 0;
+    padding: 10px 12px;
+    border-radius: var(--radius-md);
+    background: var(--info-bg);
+    color: var(--info-fg);
+    font-size: var(--fs-small);
+  }
+
+  .idx-scale label {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    font-weight: 600;
+  }
+
+  .idx-scale select {
+    min-height: 32px;
+    padding: 4px 8px;
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-sm);
+    background: var(--surface-raised);
+    color: var(--text-strong);
+    font: inherit;
+  }
+
+  .idx-steps-wrap {
+    margin-top: 12px;
+    font-size: var(--fs-small);
+  }
+
+  .idx-steps-wrap summary {
+    cursor: pointer;
+    color: var(--text-link);
+  }
+
+  .idx-demo .idx-steps {
+    margin: 8px 0 0;
+    padding-left: 1.4em;
+  }
+
+  .idx-stats {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 1px;
+    margin: 12px 0 0;
+    overflow: hidden;
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-lg);
+    background: var(--border-subtle);
+  }
+
+  .idx-stats > div {
+    padding: 10px 14px;
+    background: var(--surface-card);
+  }
+
+  .idx-stats dt {
+    color: var(--text-muted);
+    font-size: var(--fs-micro);
+    letter-spacing: var(--ls-micro);
+    text-transform: uppercase;
+  }
+
+  .idx-stats dd {
+    margin: 2px 0 0;
+    color: var(--text-strong);
+    font-family: var(--font-mono);
+    font-size: 17px;
+  }
+
+  .idx-stats dd.idx-sub {
+    color: var(--text-muted);
+    font-family: var(--font-sans);
+    font-size: 12.5px;
+  }
+
+  @media (max-width: 640px) {
+    .idx-stage {
+      aspect-ratio: auto;
+      height: 380px;
+    }
+
+    .idx-stats {
+      grid-template-columns: 1fr;
+    }
+  }
+</style>
