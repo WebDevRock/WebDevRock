@@ -1,0 +1,115 @@
+---
+layout: ../../layouts/ContentLayout.astro
+title: "Rate Limiting Algorithms Compared: Token Bucket, Leaky Bucket and Sliding Window"
+description: "Four rate limiters enforce the same limit on the same traffic, side by side in 3D. See why fixed windows let bursts through, how the two buckets differ, and how retries make it worse."
+tags: [threejs, visualization, integrations, resilience]
+updated: "2026-11-01"
+---
+
+import RateLimiters3D from '../../components/RateLimiters3D.astro';
+
+## Overview
+
+Most third-party APIs limit how fast you can call them, and reply `429 Too Many Requests` when you go over. A limit like "60 requests a minute" sounds precise, but it says nothing about *how* the requests are counted. The HTTP specification that defines 429 deliberately leaves that to each server. Depending on the algorithm behind it, the same limit can allow a burst of 20 requests in one second, reject requests that look well within it, or quietly make them wait.
+
+This experiment runs four common rate-limiting algorithms side by side. Each enforces the same limit, **10 requests per 10 seconds** (60 a minute, scaled down so a run takes half a minute), against identical traffic from an integration job.
+
+## Demo
+
+<RateLimiters3D />
+
+Requests leave your integration on the left, pass through the rate limiter (the gate) and reach the API on the right. Amber requests are on their way, green ones were accepted, blue ones are waiting in a queue, and red ones were rejected with a 429 and are heading back. Behind each gate is the limiter's own state: a counter, a 10-second log, a tray of tokens, or a queue. The chart under each lane shows how many requests reached the API in each second. Bars above the dashed line mean more than one a second, the limit's average rate.
+
+## The four algorithms
+
+### Fixed window
+
+Count requests in fixed 10-second windows, 0–10, 10–20 and so on, and reject the 11th in any window. It's the simplest to build: one counter per client, reset at every boundary.
+
+```javascript
+const window = Math.floor(now / 10);
+if (window !== currentWindow) { currentWindow = window; count = 0; }
+if (count < 10) { count++; allow(); } else reject(retryAfter = (window + 1) * 10 - now);
+```
+
+The weakness is at the boundaries. Ten requests just before the 10-second mark and ten just after are in different windows, so all twenty get through, about twice the intended rate. Run **Either side of a window**: fixed window lets 19 requests reach the API within a single second.
+
+### Sliding window
+
+Allow a request only if fewer than 10 were allowed in the **last** 10 seconds, measured back from now, not from a fixed boundary. The demo keeps a log of accepted requests' times. That's exact, but it stores one timestamp per request. A common, cheaper approximation estimates the count from the current and previous fixed windows instead, weighting the previous window by how much of it still falls within the last 10 seconds.
+
+In the boundary scenario, sliding window lets exactly 10 through and rejects the other 10. That's the limit working as most people imagine it.
+
+### Token bucket
+
+A bucket holds up to 10 tokens and gains one per second. Each request spends a token. With none left, the request is rejected.
+
+```javascript
+tokens = Math.min(10, tokens + (now - last) * 1);   // refill at 1 per second
+last = now;
+if (tokens >= 1) { tokens -= 1; allow(); } else reject(retryAfter = (1 - tokens) / 1);
+```
+
+A token bucket saves up unused capacity. After a quiet spell it allows a burst of up to 10 at once, then settles to one a second. Over a 10-second span it can let through up to 20: a full bucket plus 10 refills. Its limit is really an average rate plus a burst allowance, which is why some APIs describe their limits as a rate and a burst size.
+
+### Leaky bucket
+
+Requests drip out of a bucket at a constant rate, one a second. In the version shown here, the bucket is a **queue** with room for 10. A request that arrives when the queue has room waits its turn instead of being rejected. Only when the queue is full are requests turned away.
+
+A leaky bucket never lets the API see more than one request a second. The price is **delay**: in **Slightly too fast**, it accepts every request, but by the end of the run requests are waiting up to 7.6 seconds in the queue. That's ideal for protecting a fragile backend, and awkward for a user waiting on a page.
+
+The name "leaky bucket" is also used for a *meter* that rejects instead of queueing. That version behaves like a token bucket. If an API says it uses a leaky bucket, check which it means.
+
+## What to try
+
+### Slightly too fast
+
+The job sends 75 requests a minute against a limit of 60. In the 32-second run:
+
+- **Fixed window** accepts 32 and rejects 7.
+- **Sliding window** accepts 30 and rejects 9.
+- **Token bucket** accepts all 39. It starts with a full bucket, and that spare capacity hasn't run out by the end of the run, although it would if the job carried on.
+- **Leaky bucket** also accepts all 39, by queueing them for longer and longer.
+
+### Midnight burst
+
+Thirty requests arrive at once. Fixed window, sliding window and token bucket all accept the first 10 and reject 20. The leaky bucket accepts 11, a full queue plus the one it passes on straight away, and spreads them out at one a second. The rest are rejected once the queue is full.
+
+### Retry storm
+
+The same burst, but the client retries every 429 almost immediately. To get all 30 requests through, the clients send between 190 and 282 requests in total, roughly 6 to 9 attempts each. Every extra attempt costs the API a little, and costs you your share of the limit. On a real system, a few clients doing this can keep everyone locked out.
+
+Switch **Rejected requests** to **Wait for Retry-After** and run it again. The fixed and sliding window clients now need only 60 requests: each rejected request waits until the limiter says there will be room, and tries once more.
+
+The token and leaky bucket clients still send 140 and 130. Their Retry-After says "about a second", when the next token or queue slot frees up. But twenty clients are all waiting for that one slot, so they retry together and nineteen lose again. This is the **thundering herd** problem. The demo's client adds a small random delay, or jitter, to each wait, which helps a little. Spreading retries out further, and capping how many a client makes, helps more.
+
+## Being a good API client
+
+The HTTP specification lets a 429 include a `Retry-After` header. Its value is either a number of seconds or a date, and it means how long to wait **after receiving the response**. To stay out of trouble:
+
+- **Honour Retry-After when it's sent.** It's the server telling you exactly when it expects to have room.
+- **Otherwise back off exponentially, with jitter.** Wait 1, 2, 4, 8 seconds and so on, with a random spread so that clients don't retry in lockstep. [Retry fetch with Exponential Backoff and Jitter](/snippets/ts-fetch-retry-backoff) has a ready-made version, and the [retry backoff calculator](/tools/retry-schedule) shows the schedule.
+- **Pace yourself before you're told to.** A client-side token bucket set a little under the API's limit keeps a batch job from hitting 429s at all. It's the same algorithm as above, used on your side of the network.
+- **Treat repeated 429s as an outage, not a hiccup.** Stop the run and try later, as described in [Retry, Back Off, Give Up](/patterns/handling-unreliable-external-apis). That pattern's circuit breaker is the right tool when the limit is exhausted for minutes, not seconds.
+
+## Choosing one for your own API
+
+- **Fixed window** is easy and cheap, but allows double-rate bursts at boundaries. That's fine for generous daily quotas, and weak for protecting a server second by second.
+- **Sliding window** matches what people expect "N per minute" to mean. The approximate version costs little more than a fixed window.
+- **Token bucket** suits most public APIs. It's tolerant of the natural burstiness of real clients and simple to explain as a rate and a burst size.
+- **Leaky bucket (queue)** suits protecting a backend that can only handle a steady rate, where waiting is acceptable and rejecting isn't.
+
+## What the demo simplifies
+
+- **One server, one client.** A real API counts per API key or per user, often across many servers, so the counters live in a shared store such as Redis. Making that fast and consistent is most of the engineering work.
+- **Whole seconds.** A real `Retry-After` header carries whole seconds or a date, so servers round up. The simulation uses fractions of a second.
+- **Instant decisions.** Network time is a fixed half-second each way, and the limiter decides immediately.
+
+The four limiters are short functions in [`src/scripts/ratelimit/sim.ts`](https://github.com/WebDevRock/WebDevRock/blob/main/src/scripts/ratelimit/sim.ts). The whole run is simulated before the animation starts, so playback is just looking up where every request is at each moment. The same simulation is tested on its own, outside the page, for every scenario and retry setting.
+
+## Related
+
+- [Retry, Back Off, Give Up: Handling Unreliable External APIs](/patterns/handling-unreliable-external-apis)
+- [Retries, Backoff and Circuit Breakers, Visualised in Three.js](/experiments/integration-pipeline-particle-flow)
+- [Retry Backoff Schedule Calculator](/tools/retry-schedule)
+- [Retry fetch with Exponential Backoff and Jitter](/snippets/ts-fetch-retry-backoff)

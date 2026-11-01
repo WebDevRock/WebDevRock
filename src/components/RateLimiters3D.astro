@@ -1,0 +1,711 @@
+---
+// Four rate limiters side by side, each enforcing 10 requests per 10 seconds on the same traffic.
+// The runs are simulated up front (src/scripts/ratelimit/sim.ts); this component plays them back.
+import '../styles/tools.css';
+---
+
+<div class="rl-demo" data-pagefind-ignore>
+  <div class="rl-stage" data-rl="stage">
+    <canvas
+      data-rl="canvas"
+      role="img"
+      aria-label="Four lanes, one per rate limiter. Requests travel from a client on the left to an API on the right. Accepted requests turn green and reach the API; rejected requests turn red and bounce back. The status panels below give the same counts as text."
+    ></canvas>
+    <ul class="rl-legend" aria-hidden="true">
+      <li><span style="--dot: #E2BD73"></span>On its way</li>
+      <li><span style="--dot: #9ED39A"></span>Accepted</li>
+      <li><span style="--dot: #A9C3E0"></span>Waiting in a queue</li>
+      <li><span style="--dot: #E8846F"></span>Rejected: 429</li>
+    </ul>
+    <p class="rl-clock" data-rl="clock"></p>
+  </div>
+
+  <div class="rl-status" data-rl="status"></div>
+
+  <div class="tool rl-panel">
+    <div class="rl-scenarios" role="group" aria-label="Traffic" data-rl="scenarios"></div>
+    <p class="rl-story" data-rl="story"></p>
+    <div class="rl-row">
+      <label class="rl-inline">
+        Rejected requests
+        <select data-field="policy">
+          <option value="none">Give up</option>
+          <option value="immediate">Retry at once</option>
+          <option value="retry-after">Wait for Retry-After</option>
+        </select>
+      </label>
+      <label class="rl-inline">
+        Speed
+        <select data-field="speed">
+          <option value="0.5">Slow</option>
+          <option value="1" selected>Normal</option>
+          <option value="2.5">Fast</option>
+        </select>
+      </label>
+    </div>
+    <div class="rl-row">
+      <button type="button" class="primary" data-action="play">Pause</button>
+      <button type="button" data-action="restart">Restart</button>
+    </div>
+    <p class="rl-verdict" data-rl="verdict" aria-live="polite"></p>
+  </div>
+</div>
+
+<script>
+  import * as THREE from 'three';
+  import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+  import { CSS2DRenderer, CSS2DObject } from 'three/examples/jsm/renderers/CSS2DRenderer.js';
+  import { trackExperiment } from '../scripts/analytics';
+  import {
+    SCENARIOS,
+    NAMES,
+    LIMIT,
+    WINDOW,
+    TRAVEL,
+    DURATION,
+    simulate,
+    summarise,
+    tokensAt,
+    fixedCountAt,
+    slidingLogAt,
+    leakyQueueAt,
+    type LimiterId,
+    type RetryPolicy,
+    type Run,
+  } from '../scripts/ratelimit/sim';
+
+  const IDS: LimiterId[] = ['fixed', 'sliding', 'token', 'leaky'];
+  const LANE_Z: Record<LimiterId, number> = { fixed: -7.5, sliding: -2.5, token: 2.5, leaky: 7.5 };
+  const CLIENT_X = -9.5;
+  const GATE_X = -1.2;
+  const API_X = 9.5;
+  const MAX_DOTS = 500;
+  const queueX = (i: number) => GATE_X - 0.7 - i * 0.48;
+  const COLOURS = { travel: 0xe2bd73, ok: 0x9ed39a, wait: 0xa9c3e0, rejected: 0xe8846f };
+
+  const root = document.querySelector<HTMLElement>('.rl-demo');
+  if (root) init(root);
+
+  function init(root: HTMLElement) {
+    const q = <T extends HTMLElement>(sel: string) => root.querySelector<T>(sel)!;
+    const stage = q<HTMLElement>('[data-rl="stage"]');
+    const canvas = q<HTMLCanvasElement>('[data-rl="canvas"]');
+    const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+    // ---------- Scene ----------
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(40, 1, 0.1, 200);
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setClearColor(0x1e2528);
+    scene.add(new THREE.AmbientLight(0xffffff, 1.5));
+    const sun = new THREE.DirectionalLight(0xffffff, 1.8);
+    sun.position.set(-4, 12, 8);
+    scene.add(sun);
+
+    const labelRenderer = new CSS2DRenderer();
+    labelRenderer.domElement.className = 'rl-labels';
+    stage.appendChild(labelRenderer.domElement);
+
+    const target = new THREE.Vector3(0, 0, 1.6);
+    camera.position.set(0, 22, 19);
+    let controls: OrbitControls | null = null;
+    if (window.matchMedia('(pointer: fine)').matches) {
+      controls = new OrbitControls(camera, canvas);
+      controls.target.copy(target);
+      controls.enableZoom = false;
+      controls.enablePan = false;
+      controls.enableDamping = true;
+      controls.minPolarAngle = 0.3;
+      controls.maxPolarAngle = 1.25;
+    }
+
+    const lambert = (color: number) => new THREE.MeshLambertMaterial({ color });
+    const box = (w: number, h: number, d: number, color: number) => new THREE.Mesh(new THREE.BoxGeometry(w, h, d), lambert(color));
+    const tag = (text: string, cls: string) => {
+      const el = document.createElement('div');
+      el.className = cls;
+      el.textContent = text;
+      return new CSS2DObject(el);
+    };
+
+    // ---------- Lanes: fixed scenery plus each limiter's own gauge ----------
+    interface Lane {
+      id: LimiterId;
+      group: THREE.Group;
+      dots: THREE.InstancedMesh;
+      api: THREE.Mesh;
+      apiFlash: number;
+      cells: THREE.Mesh[]; // fixed window counter, token bucket tokens, leaky bucket queue slots
+      windowBar: THREE.Mesh | null;
+      log: THREE.InstancedMesh | null;
+      card: HTMLElement;
+      spark: HTMLCanvasElement;
+    }
+
+    const statusEl = q<HTMLElement>('[data-rl="status"]');
+    const lanes = IDS.map((id): Lane => {
+      const group = new THREE.Group();
+      group.position.z = LANE_Z[id];
+      scene.add(group);
+
+      const floor = new THREE.Mesh(new THREE.PlaneGeometry(22, 4.4), lambert(0x283033));
+      floor.rotation.x = -Math.PI / 2;
+      floor.position.set(0, -0.01, -0.3);
+      group.add(floor);
+
+      const client = box(1.2, 1, 1.2, 0x5c6461);
+      client.position.set(CLIENT_X, 0.5, 0);
+      const api = box(1.4, 1.4, 1.4, 0x2f5f8a);
+      api.position.set(API_X, 0.7, 0);
+      // The gate: two posts and a beam the requests pass under
+      const gate = new THREE.Group();
+      for (const z of [-0.9, 0.9]) {
+        const post = box(0.15, 1.6, 0.15, 0x8fb8b0);
+        post.position.set(0, 0.8, z);
+        gate.add(post);
+      }
+      const beam = box(0.15, 0.15, 1.95, 0x8fb8b0);
+      beam.position.set(0, 1.6, 0);
+      gate.add(beam);
+      gate.position.x = GATE_X;
+      group.add(client, api, gate);
+
+      const name = tag(NAMES[id], 'rl-lane-tag');
+      name.position.set(CLIENT_X + 0.4, 0, 1.55);
+      group.add(name);
+
+      // Each limiter's gauge sits behind its gate
+      const cells: THREE.Mesh[] = [];
+      let windowBar: THREE.Mesh | null = null;
+      let log: THREE.InstancedMesh | null = null;
+      if (id === 'fixed' || id === 'token') {
+        for (let i = 0; i < LIMIT; i++) {
+          const cell = id === 'fixed' ? box(0.36, 0.36, 0.36, 0x3a4446) : new THREE.Mesh(new THREE.SphereGeometry(0.2, 12, 8), lambert(0x3a4446));
+          cell.position.set(GATE_X - 5 + i * 0.48, 0.25, -1.8);
+          group.add(cell);
+          cells.push(cell);
+        }
+        if (id === 'fixed') {
+          const track = box(4.8, 0.05, 0.12, 0x3a4446);
+          track.position.set(GATE_X - 5 + 2.16, 0.03, -1.3);
+          windowBar = box(4.8, 0.08, 0.14, 0xe2bd73);
+          windowBar.position.set(GATE_X - 5 + 2.16, 0.05, -1.3);
+          group.add(track, windowBar);
+        }
+      } else if (id === 'sliding') {
+        // A 10-second strip: accepted requests slide left as they age, and drop off after 10 seconds
+        const strip = box(5, 0.05, 0.5, 0x3a4446);
+        strip.position.set(GATE_X - 3, 0.03, -1.8);
+        log = new THREE.InstancedMesh(new THREE.SphereGeometry(0.14, 10, 8), lambert(0x9ed39a), 40);
+        log.frustumCulled = false;
+        group.add(strip, log);
+      } else {
+        // The leaky bucket's queue: up to 10 waiting requests line up behind the gate, first in line nearest it
+        for (let i = 0; i < LIMIT; i++) {
+          const slot = box(0.4, 0.06, 0.4, 0x3a4446);
+          slot.position.set(queueX(i), 0.03, -1.8);
+          group.add(slot);
+          cells.push(slot);
+        }
+      }
+
+      const dots = new THREE.InstancedMesh(new THREE.SphereGeometry(0.17, 10, 8), new THREE.MeshLambertMaterial(), MAX_DOTS);
+      dots.frustumCulled = false;
+      dots.count = 0;
+      group.add(dots);
+
+      const card = document.createElement('div');
+      card.className = 'rl-card';
+      card.innerHTML = `<strong>${NAMES[id]}</strong><span data-counts></span><span data-detail></span>`;
+      const spark = document.createElement('canvas');
+      spark.className = 'rl-spark';
+      spark.width = 240;
+      spark.height = 48;
+      spark.setAttribute('aria-hidden', 'true');
+      card.append(spark);
+      statusEl.append(card);
+
+      return { id, group, dots, api, apiFlash: 0, cells, windowBar, log, card, spark };
+    });
+
+    // Labels for the ends, on the back lane only
+    const back = lanes[0].group;
+    const clientTag = tag('Your integration', 'rl-end-tag');
+    clientTag.position.set(CLIENT_X, 1.5, 0);
+    const apiTag = tag('Third-party API', 'rl-end-tag');
+    apiTag.position.set(API_X, 1.9, 0);
+    back.add(clientTag, apiTag);
+
+    // ---------- Runs ----------
+    let scenario = SCENARIOS[0];
+    let runs: Run[] = [];
+    let t = 0;
+    let playing = !reducedMotion;
+    let speed = 1;
+    let reported = false;
+
+    function rebuild() {
+      const policy = q<HTMLSelectElement>('[data-field="policy"]').value as RetryPolicy;
+      runs = IDS.map((id) => simulate(id, scenario.sends, policy));
+      t = 0;
+      reported = false;
+      q('[data-rl="verdict"]').textContent = 'The verdict appears when the run finishes.';
+      syncPlay();
+    }
+
+    // ---------- Drawing a moment ----------
+    const m = new THREE.Matrix4();
+    const c = new THREE.Color();
+    const sideOf = (request: number) => (((request * 7919) % 13) / 13 - 0.5) * 1.2; // spread lanes of traffic a little
+
+    function place(lane: Lane, run: Run) {
+      let n = 0;
+      const queue = leakyQueueAt(run, t).sort((a, b) => a.startAt - b.startAt);
+      for (const a of run.attempts) {
+        if (a.sendAt > t) break;
+        if (n >= MAX_DOTS) break;
+        const z = sideOf(a.request);
+        let x: number;
+        let y: number;
+        let colour: number;
+        if (t < a.gateAt) {
+          const u = (t - a.sendAt) / TRAVEL;
+          x = CLIENT_X + (GATE_X - CLIENT_X) * u;
+          y = 0.3 + Math.sin(Math.PI * u) * 0.5;
+          colour = COLOURS.travel;
+        } else if (a.ok && t < a.startAt) {
+          // Waiting in the leaky bucket's queue, in the order it will be passed on
+          lane.dots.setMatrixAt(n, m.makeScale(1.15, 1.15, 1.15).setPosition(queueX(Math.max(0, queue.indexOf(a))), 0.25, -1.8));
+          lane.dots.setColorAt(n++, c.setHex(COLOURS.wait));
+          continue;
+        } else if (a.ok && t < a.apiAt) {
+          const u = (t - a.startAt) / TRAVEL;
+          x = GATE_X + (API_X - GATE_X) * u;
+          y = 0.3 + Math.sin(Math.PI * u) * 0.8;
+          colour = COLOURS.ok;
+        } else if (!a.ok && t < a.gateAt + TRAVEL) {
+          const u = (t - a.gateAt) / TRAVEL;
+          x = GATE_X + (CLIENT_X - GATE_X) * u;
+          y = 0.3 + Math.sin(Math.PI * u) * 1.4;
+          colour = COLOURS.rejected;
+        } else {
+          continue;
+        }
+        lane.dots.setMatrixAt(n, m.makeScale(1, 1, 1).setPosition(x, y, z));
+        lane.dots.setColorAt(n++, c.setHex(colour));
+      }
+      lane.dots.count = n;
+      lane.dots.instanceMatrix.needsUpdate = true;
+      if (lane.dots.instanceColor) lane.dots.instanceColor.needsUpdate = true;
+
+      // The limiter's own state
+      if (lane.id === 'fixed') {
+        const count = fixedCountAt(run, t);
+        lane.cells.forEach((cell, i) => (cell.material as THREE.MeshLambertMaterial).color.setHex(i < count ? 0xe2bd73 : 0x3a4446));
+        const progress = (t % WINDOW) / WINDOW;
+        lane.windowBar!.scale.x = Math.max(0.001, progress);
+        lane.windowBar!.position.x = GATE_X - 5 - 0.24 + (4.8 * progress) / 2;
+      } else if (lane.id === 'token') {
+        const tokens = tokensAt(run, t);
+        lane.cells.forEach((cell, i) => {
+          const fill = Math.max(0, Math.min(1, tokens - i));
+          (cell.material as THREE.MeshLambertMaterial).color.setHex(fill >= 1 ? 0xe2bd73 : 0x3a4446);
+          cell.scale.setScalar(fill >= 1 ? 1 : 0.5 + 0.5 * fill);
+        });
+      } else if (lane.id === 'sliding') {
+        const log = slidingLogAt(run, t);
+        lane.log!.count = log.length;
+        log.forEach((g, i) => lane.log!.setMatrixAt(i, m.makeTranslation(GATE_X - 0.5 - ((t - g) / WINDOW) * 5, 0.22, -1.8)));
+        lane.log!.instanceMatrix.needsUpdate = true;
+      } else {
+        lane.cells.forEach((cell, i) => (cell.material as THREE.MeshLambertMaterial).color.setHex(i < queue.length ? 0x2f5f8a : 0x3a4446));
+      }
+    }
+
+    // ---------- Status cards ----------
+    function drawSpark(lane: Lane, run: Run) {
+      const g = lane.spark.getContext('2d')!;
+      const w = lane.spark.width;
+      const h = lane.spark.height;
+      g.clearRect(0, 0, w, h);
+      const bins = new Array(DURATION).fill(0);
+      for (const a of run.attempts) if (a.ok && a.apiAt <= t && a.apiAt < DURATION) bins[Math.floor(a.apiAt)]++;
+      const max = Math.max(10, ...bins);
+      const bw = w / DURATION;
+      bins.forEach((v, i) => {
+        if (!v) return;
+        g.fillStyle = v > 1 ? '#E2BD73' : '#9ED39A';
+        const bh = (v / max) * (h - 4);
+        g.fillRect(i * bw + 0.5, h - bh, bw - 1, bh);
+      });
+      // A line at 1 request per second, the limit's average rate
+      const y = h - (1 / max) * (h - 4);
+      g.strokeStyle = '#5C6461';
+      g.setLineDash([3, 3]);
+      g.beginPath();
+      g.moveTo(0, y);
+      g.lineTo(w, y);
+      g.stroke();
+      g.setLineDash([]);
+      g.fillStyle = '#E8846F';
+      g.fillRect((t / DURATION) * w, 0, 1, h);
+    }
+
+    function updateCards() {
+      lanes.forEach((lane, i) => {
+        const s = summarise(runs[i], t);
+        lane.card.querySelector('[data-counts]')!.textContent = `${s.accepted} accepted · ${s.rejected} rejected · ${s.sent} sent`;
+        const wait = lane.id === 'leaky' ? ` · longest wait ${s.maxWait.toFixed(1)} s` : '';
+        lane.card.querySelector('[data-detail]')!.textContent = `Peak at the API: ${s.peakPerSecond} in one second${wait}`;
+        drawSpark(lane, runs[i]);
+      });
+      q('[data-rl="clock"]').textContent = `${Math.min(t, DURATION).toFixed(1)} s of ${DURATION}`;
+    }
+
+    function verdict() {
+      const s = Object.fromEntries(IDS.map((id, i) => [id, summarise(runs[i])])) as Record<LimiterId, ReturnType<typeof summarise>>;
+      const total = scenario.sends.length;
+      const lines: string[] = [];
+      if (s.fixed.peakPerSecond > s.sliding.peakPerSecond + 2) {
+        lines.push(`Fixed window let ${s.fixed.peakPerSecond} requests reach the API within one second, because its count reset at the 10-second mark. Sliding window never allowed more than ${s.sliding.peakPerSecond}.`);
+      }
+      if (s.token.accepted > s.sliding.accepted) {
+        lines.push(`Token bucket accepted ${s.token.accepted} requests to sliding window’s ${s.sliding.accepted}: it saves up unused capacity, so it allows a burst after a quiet spell.`);
+      }
+      if (s.leaky.maxWait >= 1) {
+        lines.push(`Leaky bucket never passed on more than ${s.leaky.peakPerSecond} request a second, but made requests wait up to ${s.leaky.maxWait.toFixed(1)} seconds in its queue.`);
+      }
+      const policy = q<HTMLSelectElement>('[data-field="policy"]').value as RetryPolicy;
+      if (policy === 'immediate') {
+        const worst = IDS.map((id) => ({ id, ratio: s[id].sent / total })).sort((a, b) => b.ratio - a.ratio)[0];
+        lines.push(`Retrying at once, the ${NAMES[worst.id].toLowerCase()} client sent ${s[worst.id].sent} requests to get ${s[worst.id].completed} of its ${total} through: about ${worst.ratio.toFixed(0)} attempts per request.`);
+      } else if (policy === 'retry-after') {
+        lines.push(`Waiting for Retry-After, the fixed and sliding window clients sent ${s.fixed.sent} and ${s.sliding.sent} requests to get all ${total} through.`);
+      } else {
+        const lost = IDS.filter((id) => s[id].completed < total).map((id) => `${NAMES[id].toLowerCase()} ${total - s[id].completed}`);
+        if (lost.length) lines.push(`Giving up lost requests: ${lost.join(', ')}.`);
+      }
+      q('[data-rl="verdict"]').textContent = lines.join(' ') || 'All four limiters handled this traffic the same way.';
+    }
+
+    // ---------- Controls ----------
+    const playBtn = q<HTMLButtonElement>('[data-action="play"]');
+    function syncPlay() {
+      playBtn.textContent = playing ? 'Pause' : t >= DURATION ? 'Play again' : 'Play';
+    }
+    playBtn.addEventListener('click', () => {
+      if (t >= DURATION) {
+        rebuild();
+        playing = true;
+      } else {
+        playing = !playing;
+      }
+      syncPlay();
+      trackExperiment('ratelimit', playing ? 'play' : 'pause');
+    });
+    q('[data-action="restart"]').addEventListener('click', () => {
+      rebuild();
+      playing = true;
+      syncPlay();
+      trackExperiment('ratelimit', 'restart');
+    });
+    q<HTMLSelectElement>('[data-field="speed"]').addEventListener('change', (e) => (speed = Number((e.target as HTMLSelectElement).value)));
+    q<HTMLSelectElement>('[data-field="policy"]').addEventListener('change', (e) => {
+      rebuild();
+      playing = true;
+      syncPlay();
+      trackExperiment('ratelimit', `policy:${(e.target as HTMLSelectElement).value}`);
+    });
+
+    const scenariosEl = q<HTMLElement>('[data-rl="scenarios"]');
+    function chooseScenario(id: string, via: string) {
+      scenario = SCENARIOS.find((s) => s.id === id)!;
+      scenariosEl.querySelectorAll('button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.scenario === id)));
+      q('[data-rl="story"]').textContent = scenario.story;
+      q<HTMLSelectElement>('[data-field="policy"]').value = scenario.policy;
+      rebuild();
+      if (via !== 'init') {
+        playing = true;
+        syncPlay();
+        trackExperiment('ratelimit', `scenario:${id}`);
+      }
+    }
+    scenariosEl.replaceChildren(
+      ...SCENARIOS.map((s) => {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.dataset.scenario = s.id;
+        b.setAttribute('aria-pressed', 'false');
+        b.textContent = s.title;
+        b.addEventListener('click', () => chooseScenario(s.id, 'button'));
+        return b;
+      })
+    );
+
+    // ---------- Render loop ----------
+    function fit() {
+      const w = stage.clientWidth;
+      const h = stage.clientHeight;
+      if (!w || !h) return;
+      camera.aspect = w / h;
+      const dist = 27 / Math.min(1, camera.aspect * 0.75);
+      const dir = camera.position.clone().sub(target).normalize();
+      camera.position.copy(target).addScaledVector(dir, dist);
+      camera.updateProjectionMatrix();
+      renderer.setSize(w, h, false);
+      labelRenderer.setSize(w, h);
+    }
+    new ResizeObserver(fit).observe(stage);
+
+    let last = performance.now();
+    let cardTimer = 0;
+    const apiBase = new THREE.Color(0x2f5f8a);
+    const apiHit = new THREE.Color(0x9ed39a);
+    function frame(now: number) {
+      const dt = Math.min(0.1, (now - last) / 1000);
+      last = now;
+      const before = t;
+      if (playing && t < DURATION) {
+        t = Math.min(DURATION, t + dt * speed);
+        if (t >= DURATION) {
+          playing = false;
+          syncPlay();
+        }
+      }
+      lanes.forEach((lane, i) => {
+        // Flash the API box when requests arrive
+        if (runs[i].attempts.some((a) => a.ok && a.apiAt > before && a.apiAt <= t)) lane.apiFlash = 1;
+        lane.apiFlash = Math.max(0, lane.apiFlash - dt * 4);
+        (lane.api.material as THREE.MeshLambertMaterial).color.copy(apiBase).lerp(apiHit, lane.apiFlash);
+        place(lane, runs[i]);
+      });
+      cardTimer += dt;
+      if (cardTimer > 0.2 || !playing) {
+        cardTimer = 0;
+        updateCards();
+      }
+      if (t >= DURATION && !reported) {
+        reported = true;
+        verdict();
+      }
+      controls?.update();
+      renderer.render(scene, camera);
+      labelRenderer.render(scene, camera);
+    }
+
+    new IntersectionObserver(([entry]) => {
+      if (entry.isIntersecting) {
+        last = performance.now();
+        renderer.setAnimationLoop(frame);
+      } else {
+        renderer.setAnimationLoop(null);
+      }
+    }).observe(stage);
+
+    chooseScenario('boundary', 'init');
+    syncPlay();
+    fit();
+  }
+</script>
+
+<style is:global>
+  .rl-demo {
+    margin: 2rem 0;
+  }
+
+  .rl-stage {
+    position: relative;
+    aspect-ratio: 4 / 3;
+    overflow: hidden;
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-lg);
+    background: var(--surface-inverse);
+  }
+
+  .rl-stage canvas {
+    display: block;
+    width: 100%;
+    height: 100%;
+  }
+
+  .rl-labels {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+  }
+
+  .rl-lane-tag,
+  .rl-end-tag {
+    padding: 1px 7px;
+    border-radius: var(--radius-xs);
+    background: rgba(30, 37, 40, 0.85);
+    color: var(--syn-text);
+    font-family: var(--font-sans);
+    font-size: 11.5px;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+
+  .rl-end-tag {
+    color: var(--syn-muted);
+    font-weight: 500;
+  }
+
+  .rl-legend {
+    position: absolute;
+    top: 10px;
+    left: 12px;
+    z-index: 1;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 12px;
+    max-width: calc(100% - 140px);
+    margin: 0;
+    padding: 5px 9px;
+    border-radius: var(--radius-sm);
+    background: rgba(30, 37, 40, 0.85);
+    list-style: none;
+    color: var(--syn-muted);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    pointer-events: none;
+  }
+
+  .rl-demo .rl-legend li {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    margin: 0;
+  }
+
+  .rl-legend span {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: var(--dot);
+  }
+
+  .rl-clock {
+    position: absolute;
+    top: 10px;
+    right: 12px;
+    margin: 0;
+    padding: 4px 8px;
+    border-radius: var(--radius-sm);
+    background: rgba(30, 37, 40, 0.85);
+    color: var(--syn-text);
+    font-family: var(--font-mono);
+    font-size: 12px;
+  }
+
+  .rl-status {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 8px;
+    margin-top: 10px;
+  }
+
+  .rl-card {
+    display: grid;
+    gap: 2px;
+    padding: 8px 10px;
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-md);
+    background: var(--surface-card);
+    font-size: 13px;
+    line-height: 1.35;
+  }
+
+  .rl-card [data-counts] {
+    color: var(--text-body);
+    font-family: var(--font-mono);
+    font-size: 12px;
+  }
+
+  .rl-card [data-detail] {
+    color: var(--text-muted);
+    font-size: 12px;
+  }
+
+  .rl-spark {
+    width: 100%;
+    height: 40px;
+    margin-top: 4px;
+    border-radius: var(--radius-xs);
+    background: var(--surface-raised);
+  }
+
+  .rl-panel {
+    margin-top: 12px;
+  }
+
+  .rl-scenarios {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .rl-scenarios button {
+    padding: 5px 11px;
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-md);
+    background: var(--surface-raised);
+    color: var(--text-strong);
+    font: inherit;
+    font-size: 13.5px;
+    font-weight: 500;
+    cursor: pointer;
+  }
+
+  .rl-scenarios button[aria-pressed='true'] {
+    border-color: var(--accent);
+    background: var(--accent-tint);
+  }
+
+  .rl-demo .rl-story,
+  .rl-demo .rl-verdict {
+    margin: 0;
+    font-size: var(--fs-small);
+  }
+
+  .rl-demo .rl-verdict {
+    padding: 10px 12px;
+    border-left: 3px solid var(--accent);
+    border-radius: var(--radius-sm);
+    background: var(--surface-raised);
+    color: var(--text-strong);
+  }
+
+  .rl-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px 16px;
+  }
+
+  .rl-demo .tool label.rl-inline {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .rl-demo .tool label.rl-inline select {
+    width: auto;
+  }
+
+  @media (max-width: 640px) {
+    .rl-stage {
+      aspect-ratio: auto;
+      height: 400px;
+    }
+
+    .rl-status {
+      grid-template-columns: 1fr;
+    }
+
+    .rl-legend {
+      display: none;
+    }
+  }
+</style>
