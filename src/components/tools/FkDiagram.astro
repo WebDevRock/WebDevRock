@@ -23,18 +23,43 @@ import '../../styles/tools.css';
         <option value="none">Table names only</option>
       </select>
     </label>
+    <div class="fkd-picker-field">
+      <label for="fkd-focus-search">Show</label>
+      <div class="fkd-picker">
+        <input
+          type="text"
+          id="fkd-focus-search"
+          data-field="focus-search"
+          role="combobox"
+          aria-autocomplete="list"
+          aria-expanded="false"
+          aria-controls="fkd-focus-options"
+          placeholder="Every table"
+          autocomplete="off"
+          spellcheck="false"
+          disabled
+        />
+        <button type="button" class="fkd-clear" data-field="focus-clear" aria-label="Show every table" hidden>×</button>
+        <ul class="fkd-options" id="fkd-focus-options" role="listbox" aria-label="Tables" data-field="focus-options" hidden></ul>
+      </div>
+      <input type="hidden" data-field="focus" value="" />
+    </div>
     <label>
-      Show
-      <select data-field="focus" disabled>
-        <option value="">Every table</option>
+      Following
+      <select data-field="direction" disabled>
+        <option value="updown">What it references and what references it</option>
+        <option value="references">Only what it references</option>
+        <option value="referenced">Only what references it</option>
+        <option value="any">Every link, in any direction</option>
       </select>
     </label>
     <label>
-      Around it
+      How far
       <select data-field="depth" disabled>
         <option value="1">1 relationship away</option>
         <option value="2">2 relationships away</option>
         <option value="3">3 relationships away</option>
+        <option value="all">All the way</option>
       </select>
     </label>
     <label class="tool-check">
@@ -49,6 +74,8 @@ import '../../styles/tools.css';
   </div>
 
   <p class="tool-status" data-field="status" aria-live="polite"></p>
+
+  <dl class="fkd-reach" data-field="reach" hidden></dl>
 
   <div class="fkd-stage" data-field="stage" hidden>
     <div class="fkd-toolbar">
@@ -78,7 +105,7 @@ import '../../styles/tools.css';
       <span><svg width="34" height="14"><path class="untrusted" d="M2 7 H32" /></svg>not trusted</span>
       <span><svg width="34" height="14"><path class="disabled" d="M2 7 H32" /></svg>disabled</span>
     </div>
-    <p class="fkd-hint">Drag the background to move around, drag a table to move it, and click a table to pick out its relationships. Ctrl + scroll (or pinch on a trackpad) zooms.</p>
+    <p class="fkd-hint">Drag the background to move around, drag a table to move it, click a table to pick out its relationships, and double-click one to show only the tables related to it. Ctrl + scroll (or pinch on a trackpad) zooms.</p>
   </div>
 
   <details class="fkd-list" data-field="list-wrap" hidden>
@@ -117,9 +144,11 @@ import '../../styles/tools.css';
     parseResults,
     toMermaid,
     typeLabel,
+    reachFrom,
     visibleTables,
     type Box,
     type ColumnMode,
+    type Direction,
     type ForeignKey,
     type Layout,
     type Model,
@@ -156,7 +185,7 @@ import '../../styles/tools.css';
     .fkd-edge.is-on:not(.is-untrusted):not(.is-disabled) .fkd-line,
     .fkd-edge.is-on:not(.is-untrusted):not(.is-disabled) .fkd-mark,
     .fkd-edge.is-on:not(.is-untrusted):not(.is-disabled) .fkd-ring { stroke: ${v('--accent')}; }
-    .fkd-table.is-selected .fkd-box { stroke: ${v('--accent')}; stroke-width: 2; }
+    .fkd-table.is-selected .fkd-box, .fkd-table.is-focus .fkd-box { stroke: ${v('--accent')}; stroke-width: 2; }
     .fkd-table { cursor: grab; }
   `;
 
@@ -172,8 +201,10 @@ import '../../styles/tools.css';
   if (root) {
     const input = field<HTMLTextAreaElement>(root, 'input');
     const columns = field<HTMLSelectElement>(root, 'columns');
-    const focus = field<HTMLSelectElement>(root, 'focus');
+    const focus = field<HTMLInputElement>(root, 'focus');
     const depth = field<HTMLSelectElement>(root, 'depth');
+    const direction = field<HTMLSelectElement>(root, 'direction');
+    const reachList = field<HTMLDListElement>(root, 'reach');
     const isolated = field<HTMLInputElement>(root, 'isolated');
     const status = field<HTMLElement>(root, 'status');
     const stage = field<HTMLElement>(root, 'stage');
@@ -257,6 +288,7 @@ import '../../styles/tools.css';
       for (const [tid, g] of tableEls) {
         g.classList.toggle('is-on', on.has(tid));
         g.classList.toggle('is-selected', tid === selected);
+        g.classList.toggle('is-focus', tid === focus.value);
       }
     };
 
@@ -349,7 +381,7 @@ import '../../styles/tools.css';
     const render = (refit: boolean) => {
       if (!model) return;
       const mode = columns.value as ColumnMode;
-      visible = visibleTables(model, focus.value || null, Number(depth.value), isolated.checked || !!focus.value);
+      visible = visibleTables(model, focus.value || null, steps(), isolated.checked || !!focus.value, direction.value as Direction);
       current = layout(model, visible, mode);
       if (selected && !visible.has(selected)) selected = null;
       hovered = null;
@@ -386,6 +418,7 @@ import '../../styles/tools.css';
       highlight();
       if (refit) fit(true);
       renderList();
+      renderReach();
 
       const shownFks = edgeEls.length;
       const notes = [`${visible.size} table${visible.size === 1 ? '' : 's'}`, `${shownFks} foreign key${shownFks === 1 ? '' : 's'}`];
@@ -403,15 +436,213 @@ import '../../styles/tools.css';
       setStatus(status, message, model.skipped || disabled || untrusted ? 'warn' : 'info');
     };
 
+    const steps = () => (depth.value === 'all' ? Infinity : Number(depth.value));
+
+    // For a chosen table: what it references and what references it, by how many steps away
+    const renderReach = () => {
+      const id = focus.value;
+      reachList.hidden = !id;
+      if (!id) return reachList.replaceChildren();
+      const name = (t: string) => displayName(model!, model!.tables.get(t)!);
+      const { references, referenced } = reachFrom(model!, id, steps());
+      const dir = direction.value as Direction;
+      const section = (title: string, empty: string, levels: Map<string, number>) => {
+        const dt = document.createElement('dt');
+        dt.textContent = `${title} (${levels.size})`;
+        const dd = document.createElement('dd');
+        if (!levels.size) dd.textContent = empty;
+        const max = Math.max(0, ...levels.values());
+        for (let level = 1; level <= max; level++) {
+          const names = [...levels].filter(([, l]) => l === level).map(([t]) => name(t)).sort((a, b) => a.localeCompare(b));
+          const line = document.createElement('div');
+          const label = document.createElement('span');
+          label.className = 'fkd-level';
+          label.textContent = level === 1 ? 'directly' : `${level} steps away`;
+          line.append(label, ` ${names.join(', ')}`);
+          dd.append(line);
+        }
+        return [dt, dd];
+      };
+      const parts: HTMLElement[] = [];
+      if (dir !== 'referenced') {
+        parts.push(...section(`${name(id)} references`, 'Nothing: it has no foreign keys of its own.', references));
+      }
+      if (dir !== 'references') {
+        parts.push(...section(`Referenced by`, 'Nothing: no foreign key points at it.', referenced));
+      }
+      if (dir === 'any') {
+        const others = [...visible].filter((t) => t !== id && !references.has(t) && !referenced.has(t));
+        if (others.length) {
+          const dt = document.createElement('dt');
+          dt.textContent = `Linked another way (${others.length})`;
+          const dd = document.createElement('dd');
+          dd.textContent = others.map(name).sort((a, b) => a.localeCompare(b)).join(', ');
+          parts.push(dt, dd);
+        }
+      }
+      reachList.replaceChildren(...parts);
+    };
+
+    // ---- The searchable table picker (an ARIA combobox). The chosen table's id is kept in the hidden focus field.
+
+    const search = field<HTMLInputElement>(root, 'focus-search');
+    const clear = field<HTMLButtonElement>(root, 'focus-clear');
+    const optionList = field<HTMLUListElement>(root, 'focus-options');
+    const MAX_OPTIONS = 100;
+    type Pick = { id: string; label: string; name: string; references: number; referencedBy: number };
+    let picks: Pick[] = [];
+    let matches: (Pick | null)[] = []; // null is "Every table"
+    let active = 0;
+
+    const labelFor = (id: string) => picks.find((p) => p.id === id)?.label ?? '';
+
+    const closeOptions = () => {
+      optionList.hidden = true;
+      search.setAttribute('aria-expanded', 'false');
+      search.removeAttribute('aria-activedescendant');
+    };
+
+    const choose = (id: string) => {
+      closeOptions();
+      search.value = labelFor(id);
+      clear.hidden = !id;
+      if (id === focus.value) return;
+      focus.value = id;
+      focus.dispatchEvent(new Event('change'));
+    };
+
+    // Table names starting with the text first, then table names containing it, then schema.table matches
+    const filter = (text: string): Pick[] => {
+      const q = text.trim().toLowerCase();
+      if (!q) return picks;
+      const scored: [Pick, number][] = [];
+      for (const p of picks) {
+        const name = p.name.toLowerCase();
+        const label = p.label.toLowerCase();
+        const score = name.startsWith(q) ? 0 : name.includes(q) ? 1 : label.startsWith(q) ? 2 : label.includes(q) ? 3 : -1;
+        if (score >= 0) scored.push([p, score]);
+      }
+      return scored.sort((a, b) => a[1] - b[1] || a[0].label.localeCompare(b[0].label)).map(([p]) => p);
+    };
+
+    const markMatch = (text: string, q: string) => {
+      const frag = document.createDocumentFragment();
+      const i = q ? text.toLowerCase().lastIndexOf(q) : -1;
+      if (i < 0) frag.append(text);
+      else {
+        const mark = document.createElement('mark');
+        mark.textContent = text.slice(i, i + q.length);
+        frag.append(text.slice(0, i), mark, text.slice(i + q.length));
+      }
+      return frag;
+    };
+
+    const setActive = (index: number) => {
+      const items = optionList.querySelectorAll<HTMLElement>('[role="option"]');
+      if (!items.length) return;
+      active = (index + items.length) % items.length;
+      items.forEach((item, i) => item.setAttribute('aria-selected', String(i === active)));
+      search.setAttribute('aria-activedescendant', items[active].id);
+      items[active].scrollIntoView({ block: 'nearest' });
+    };
+
+    const openOptions = () => {
+      const q = search.value.trim().toLowerCase();
+      const found = filter(search.value);
+      matches = q ? found.slice(0, MAX_OPTIONS) : [null, ...found.slice(0, MAX_OPTIONS)];
+      const items = matches.map((p, i) => {
+        const li = document.createElement('li');
+        li.id = `fkd-focus-option-${i}`;
+        li.setAttribute('role', 'option');
+        if (!p) {
+          li.className = 'fkd-option-all';
+          li.textContent = 'Every table';
+        } else {
+          const name = document.createElement('span');
+          name.className = 'fkd-option-name';
+          name.append(markMatch(p.label, q));
+          const meta = document.createElement('span');
+          meta.className = 'fkd-option-meta';
+          meta.textContent = p.references || p.referencedBy ? `references ${p.references} · referenced by ${p.referencedBy}` : 'no foreign keys';
+          li.append(name, meta);
+        }
+        li.addEventListener('mousedown', (e) => e.preventDefault()); // keep focus in the box
+        li.addEventListener('click', () => choose(p?.id ?? ''));
+        return li;
+      });
+      if (!found.length) {
+        const li = document.createElement('li');
+        li.className = 'fkd-option-note';
+        li.textContent = 'No tables match';
+        items.push(li);
+      } else if (found.length > MAX_OPTIONS) {
+        const li = document.createElement('li');
+        li.className = 'fkd-option-note';
+        li.textContent = `${(found.length - MAX_OPTIONS).toLocaleString()} more: keep typing to narrow the list`;
+        items.push(li);
+      }
+      optionList.replaceChildren(...items);
+      optionList.hidden = false;
+      search.setAttribute('aria-expanded', 'true');
+      const current = matches.findIndex((p) => (p?.id ?? '') === focus.value);
+      setActive(q ? 0 : Math.max(0, current));
+    };
+
+    search.addEventListener('focus', () => {
+      search.select();
+      openOptions();
+    });
+    search.addEventListener('click', () => {
+      if (optionList.hidden) openOptions();
+    });
+    search.addEventListener('input', openOptions);
+    search.addEventListener('keydown', (e) => {
+      const open = !optionList.hidden;
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        if (!open) openOptions();
+        else setActive(active + (e.key === 'ArrowDown' ? 1 : -1));
+      } else if (e.key === 'Enter' && open) {
+        e.preventDefault();
+        const p = matches[active];
+        if (p !== undefined) choose(p?.id ?? '');
+      } else if (e.key === 'Escape' && open) {
+        e.preventDefault();
+        closeOptions();
+        search.value = labelFor(focus.value);
+      }
+    });
+    search.addEventListener('blur', () => {
+      closeOptions();
+      search.value = labelFor(focus.value);
+    });
+    clear.addEventListener('click', () => choose(''));
+
     const fillFocus = () => {
       const keep = focus.value;
-      const options = [...model!.tables.values()]
-        .map((t) => ({ id: t.id, label: displayName(model!, t) }))
+      const references = new Map<string, Set<string>>();
+      const referencedBy = new Map<string, Set<string>>();
+      for (const fk of model!.fks) {
+        if (!references.has(fk.child)) references.set(fk.child, new Set());
+        if (!referencedBy.has(fk.parent)) referencedBy.set(fk.parent, new Set());
+        references.get(fk.child)!.add(fk.parent);
+        referencedBy.get(fk.parent)!.add(fk.child);
+      }
+      picks = [...model!.tables.values()]
+        .map((t) => ({
+          id: t.id,
+          label: displayName(model!, t),
+          name: t.name,
+          references: references.get(t.id)?.size ?? 0,
+          referencedBy: referencedBy.get(t.id)?.size ?? 0,
+        }))
         .sort((a, b) => a.label.localeCompare(b.label));
-      focus.replaceChildren(new Option('Every table', ''), ...options.map((o) => new Option(o.label, o.id)));
-      focus.value = options.some((o) => o.id === keep) ? keep : '';
-      focus.disabled = false;
-      depth.disabled = !focus.value;
+      focus.value = picks.some((p) => p.id === keep) ? keep : '';
+      search.value = labelFor(focus.value);
+      search.placeholder = `Every table (${picks.length.toLocaleString()}): type to search`;
+      clear.hidden = !focus.value;
+      search.disabled = false;
+      depth.disabled = direction.disabled = !focus.value;
     };
 
     const draw = (action: string) => {
@@ -440,11 +671,12 @@ import '../../styles/tools.css';
     columns.addEventListener('change', () => render(true));
     isolated.addEventListener('change', () => render(true));
     focus.addEventListener('change', () => {
-      depth.disabled = !focus.value;
-      selected = focus.value || null;
+      depth.disabled = direction.disabled = !focus.value;
+      selected = null;
       render(true);
     });
     depth.addEventListener('change', () => render(true));
+    direction.addEventListener('change', () => render(true));
 
     // ---- Moving around: drag to pan, drag a table to move it, click to select, Ctrl + wheel to zoom
 
@@ -488,6 +720,10 @@ import '../../styles/tools.css';
       drag = null;
     };
     svg.addEventListener('pointerup', endDrag);
+    svg.addEventListener('dblclick', (e) => {
+      const id = (e.target as Element).closest<SVGGElement>('.fkd-table')?.dataset.id;
+      if (id) choose(id);
+    });
     svg.addEventListener('pointercancel', endDrag);
 
     svg.addEventListener('pointerover', (e) => {
@@ -598,6 +834,145 @@ import '../../styles/tools.css';
 </script>
 
 <style is:global>
+  /* tools.css hides [hidden] with the same specificity, so these display rules would otherwise win */
+  .fkd .fkd-reach[hidden],
+  .fkd .fkd-options[hidden] {
+    display: none;
+  }
+
+  .fkd .fkd-picker-field {
+    display: grid;
+    gap: 6px;
+    align-content: start;
+  }
+
+  .fkd .fkd-picker {
+    position: relative;
+  }
+
+  .fkd .fkd-picker input {
+    padding-right: 36px;
+    text-overflow: ellipsis;
+  }
+
+  .fkd .fkd-picker input:disabled {
+    cursor: not-allowed;
+    opacity: 0.6;
+  }
+
+  .fkd .fkd-picker .fkd-clear {
+    position: absolute;
+    top: 50%;
+    right: 4px;
+    width: 30px;
+    height: 30px;
+    min-height: 0;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: var(--text-muted);
+    font-size: 18px;
+    line-height: 1;
+    transform: translateY(-50%);
+  }
+
+  .fkd .fkd-picker .fkd-clear:hover {
+    background: var(--surface-sunken);
+    color: var(--text-strong);
+  }
+
+  .fkd .fkd-options {
+    position: absolute;
+    z-index: 30;
+    top: calc(100% + 4px);
+    left: 0;
+    width: max(100%, min(380px, calc(100vw - 32px)));
+    max-height: 320px;
+    margin: 0;
+    padding: 4px;
+    overflow-y: auto;
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-md);
+    background: var(--surface-raised);
+    box-shadow: var(--shadow-pop);
+    list-style: none;
+  }
+
+  .fkd .fkd-options li {
+    display: grid;
+    gap: 1px;
+    margin: 0;
+    padding: 6px 8px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+  }
+
+  .fkd .fkd-options li[aria-selected='true'] {
+    background: var(--accent-tint);
+  }
+
+  .fkd .fkd-option-name {
+    color: var(--text-strong);
+    font-family: var(--font-mono);
+    font-size: 13.5px;
+    overflow-wrap: anywhere;
+  }
+
+  .fkd .fkd-option-name mark {
+    background: transparent;
+    color: var(--accent);
+    font-weight: 700;
+  }
+
+  .fkd .fkd-option-meta {
+    color: var(--text-muted);
+    font-size: 12px;
+  }
+
+  .fkd .fkd-options .fkd-option-all {
+    color: var(--text-strong);
+    font-weight: 600;
+  }
+
+  .fkd .fkd-options .fkd-option-note {
+    color: var(--text-muted);
+    font-size: 13px;
+    cursor: default;
+  }
+
+  .fkd .fkd-reach {
+    display: grid;
+    gap: 4px;
+    margin: 0;
+    padding: 12px 14px;
+    border-left: 4px solid var(--accent);
+    border-radius: var(--radius-md);
+    background: var(--surface-raised);
+    font-size: var(--fs-small);
+  }
+
+  .fkd .fkd-reach dt {
+    color: var(--text-strong);
+    font-weight: 600;
+  }
+
+  .fkd .fkd-reach dt:not(:first-child) {
+    margin-top: 6px;
+  }
+
+  .fkd .fkd-reach dd {
+    margin: 0;
+    color: var(--text-body);
+    font-family: var(--font-mono);
+    font-size: 13px;
+    overflow-wrap: anywhere;
+  }
+
+  .fkd .fkd-reach .fkd-level {
+    color: var(--text-muted);
+    font-family: var(--font-sans);
+  }
+
   .fkd .fkd-stage {
     display: grid;
     gap: 8px;

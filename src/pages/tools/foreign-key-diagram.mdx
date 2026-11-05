@@ -95,6 +95,17 @@ In SSMS, click the top-left corner of the results grid, then right-click and cho
 
 <FkDiagram />
 
+## Following one table's relationships
+
+Type part of a table's name under **Show** and pick it from the list, or double-click a table in the diagram, to draw it with only the tables related to it. Each table in the list shows how many tables it references and how many reference it. A summary above the diagram lists them, grouped by how many steps away they are. **Following** chooses which relationships to follow:
+
+- **What it references and what references it** follows the foreign keys up from the table and down from it, each in its own direction, as far as you choose. It's the table's full chain of dependencies. Tables that only share a parent with it, such as other tables that reference the same customer, are left out.
+- **Only what it references** shows the tables its rows depend on: a row of this table can only be inserted once the rows it points to exist, unless its foreign key columns are left `NULL`. That's the list to copy first when moving data between environments.
+- **Only what references it** shows the tables with rows that depend on it. These are the tables to check before deleting from it: their rows either block the delete or, with `ON DELETE CASCADE` or `SET NULL`, are changed along with it. Following it **all the way** gives the complete chain a delete can reach.
+- **Every link, in any direction** follows each foreign key both ways at every step, so it also reaches tables that share a parent with it. Followed all the way, that's every table connected to it at all.
+
+**How far** limits the number of steps. **All the way** keeps going until there's nothing left to follow, and stops at loops, such as a table that references itself.
+
 ## Reading the diagram
 
 - **Parents are on the left.** Each table is placed to the right of the tables it references, so lookup and master tables gather on the left and the tables that depend on them on the right.
@@ -108,7 +119,7 @@ These three need the second query; with just the foreign keys, every line is dra
 
 ## Notes
 
-- **Large databases:** choose a table under **Show** to draw just that table and the ones around it. **Key columns only** keeps big tables compact.
+- **Large databases:** choose a table under **Show** to draw just that table and the tables related to it. **Key columns only** keeps big tables compact.
 - **Moving tables:** dragging a table only changes the picture. Changing an option redraws the layout from scratch.
 - **Mermaid:** **Copy Mermaid** gives an `erDiagram` you can paste into GitHub, GitLab, Notion, or anywhere else that renders Mermaid. Names are changed to letters, digits and underscores, and the schema is joined to the table name with an underscore when there's more than one schema.
 - **Share link:** the link holds the pasted results, so anyone with it can see the table and column names. For a large schema it can be too long for some chat tools.

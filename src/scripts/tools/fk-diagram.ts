@@ -264,24 +264,68 @@ export const displayName = (model: Model, t: Table) => (model.schemas > 1 && t.s
 
 export type ColumnMode = 'all' | 'keys' | 'none';
 
-// Tables within `depth` relationships of the focus table, or every table
-export function visibleTables(model: Model, focus: string | null, depth: number, isolated: boolean): Set<string> {
-  const linked = new Set(model.fks.flatMap((fk) => (fk.child === fk.parent ? [] : [fk.child, fk.parent])));
-  if (!focus || !model.tables.has(focus)) {
-    return new Set([...model.tables.keys()].filter((id) => isolated || linked.has(id)));
-  }
-  const seen = new Set([focus]);
+// How to follow relationships out from a chosen table:
+//   any        - every link in either direction, so it also reaches tables that share a parent with it
+//   updown     - what it references (and what they reference...), plus what references it (and so on)
+//   references - only what it references: the tables a row needs to exist first
+//   referenced - only what references it: the tables with rows that depend on it
+export type Direction = 'any' | 'updown' | 'references' | 'referenced';
+
+// Distance in relationships from the focus table to each table reached, following one direction or both
+function reach(model: Model, focus: string, depth: number, step: (fk: ForeignKey, from: string) => string | null): Map<string, number> {
+  const level = new Map([[focus, 0]]);
   let frontier = [focus];
-  for (let d = 0; d < depth && frontier.length; d++) {
+  for (let d = 1; d <= depth && frontier.length; d++) {
     const next: string[] = [];
-    for (const fk of model.fks) {
-      for (const [a, b] of [[fk.child, fk.parent], [fk.parent, fk.child]]) {
-        if (frontier.includes(a) && !seen.has(b)) { seen.add(b); next.push(b); }
+    for (const id of frontier) {
+      for (const fk of model.fks) {
+        const to = step(fk, id);
+        if (to && !level.has(to)) { level.set(to, d); next.push(to); }
       }
     }
     frontier = next;
   }
-  return seen;
+  return level;
+}
+
+const upStep = (fk: ForeignKey, from: string) => (fk.child === from ? fk.parent : null);
+const downStep = (fk: ForeignKey, from: string) => (fk.parent === from ? fk.child : null);
+const anyStep = (fk: ForeignKey, from: string) => (fk.child === from ? fk.parent : fk.parent === from ? fk.child : null);
+
+export interface Reach {
+  // Tables the focus table references, directly or through others, with how many steps away
+  references: Map<string, number>;
+  // Tables that reference the focus table, directly or through others
+  referenced: Map<string, number>;
+}
+
+export function reachFrom(model: Model, focus: string, depth: number): Reach {
+  const references = reach(model, focus, depth, upStep);
+  const referenced = reach(model, focus, depth, downStep);
+  references.delete(focus);
+  referenced.delete(focus);
+  return { references, referenced };
+}
+
+// Tables within `depth` relationships of the focus table in the chosen direction, or every table
+export function visibleTables(
+  model: Model,
+  focus: string | null,
+  depth: number,
+  isolated: boolean,
+  direction: Direction = 'any',
+): Set<string> {
+  const linked = new Set(model.fks.flatMap((fk) => (fk.child === fk.parent ? [] : [fk.child, fk.parent])));
+  if (!focus || !model.tables.has(focus)) {
+    return new Set([...model.tables.keys()].filter((id) => isolated || linked.has(id)));
+  }
+  if (direction === 'any') return new Set(reach(model, focus, depth, anyStep).keys());
+  const { references, referenced } = reachFrom(model, focus, depth);
+  return new Set([
+    focus,
+    ...(direction !== 'referenced' ? references.keys() : []),
+    ...(direction !== 'references' ? referenced.keys() : []),
+  ]);
 }
 
 export const columnsFor = (t: Table, mode: ColumnMode): Column[] =>
