@@ -1,0 +1,705 @@
+---
+// Foreign key diagram: pasted SQL Server query results drawn as tables and relationships
+import '../../styles/tools.css';
+---
+
+<div class="tool fkd" data-tool="foreign-key-diagram" data-pagefind-ignore>
+  <label>
+    Query results, with the header row
+    <textarea
+      data-field="input"
+      spellcheck="false"
+      rows="8"
+      placeholder={'ChildSchema\tChildTable\tChildColumn\tParentSchema\tParentTable\tParentColumn\tForeignKeyName\ndbo\tOrder\tCustomerID\tdbo\tCustomer\tCustomerID\tFK_Order_Customer'}
+    ></textarea>
+  </label>
+
+  <div class="tool-row">
+    <label>
+      Columns
+      <select data-field="columns">
+        <option value="all">All columns</option>
+        <option value="keys">Key columns only</option>
+        <option value="none">Table names only</option>
+      </select>
+    </label>
+    <label>
+      Show
+      <select data-field="focus" disabled>
+        <option value="">Every table</option>
+      </select>
+    </label>
+    <label>
+      Around it
+      <select data-field="depth" disabled>
+        <option value="1">1 relationship away</option>
+        <option value="2">2 relationships away</option>
+        <option value="3">3 relationships away</option>
+      </select>
+    </label>
+    <label class="tool-check">
+      <input type="checkbox" data-field="isolated" checked />
+      Include tables with no foreign keys
+    </label>
+  </div>
+
+  <div class="tool-actions">
+    <button type="button" class="primary" data-field="draw">Draw diagram</button>
+    <button type="button" data-field="example">Try an example</button>
+  </div>
+
+  <p class="tool-status" data-field="status" aria-live="polite"></p>
+
+  <div class="fkd-stage" data-field="stage" hidden>
+    <div class="fkd-toolbar">
+      <div class="fkd-group" role="group" aria-label="Zoom">
+        <button type="button" class="small" data-field="zoom-out" aria-label="Zoom out">−</button>
+        <button type="button" class="small" data-field="zoom-in" aria-label="Zoom in">+</button>
+        <button type="button" class="small" data-field="fit">Fit</button>
+        <button type="button" class="small" data-field="full">Full screen</button>
+      </div>
+      <div class="fkd-group" role="group" aria-label="Export">
+        <button type="button" class="small" data-field="svg">Download SVG</button>
+        <button type="button" class="small" data-field="png">Download PNG</button>
+        <button type="button" class="small" data-field="mermaid">Copy Mermaid</button>
+      </div>
+    </div>
+    <div class="fkd-viewport">
+      <svg class="fkd-svg" data-field="svg-root" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Diagram of tables and their foreign keys">
+        <style data-field="svg-style"></style>
+        <g data-field="world"></g>
+      </svg>
+    </div>
+    <div class="fkd-legend" aria-hidden="true">
+      <span><svg width="34" height="14"><path d="M2 7 H32 M8 1 V13 M13 1 V13" /></svg>exactly one</span>
+      <span><svg width="34" height="14"><path d="M2 7 H32 M8 1 V13" /><circle cx="17" cy="7" r="4" /></svg>zero or one (nullable)</span>
+      <span><svg width="34" height="14"><path d="M2 7 H32 M19 7 L32 1 M19 7 L32 13" /></svg>many</span>
+      <span><svg width="34" height="14"><path d="M2 7 H32 M26 1 V13" /><circle cx="17" cy="7" r="4" /></svg>at most one (one-to-one)</span>
+      <span><svg width="34" height="14"><path class="untrusted" d="M2 7 H32" /></svg>not trusted</span>
+      <span><svg width="34" height="14"><path class="disabled" d="M2 7 H32" /></svg>disabled</span>
+    </div>
+    <p class="fkd-hint">Drag the background to move around, drag a table to move it, and click a table to pick out its relationships. Ctrl + scroll (or pinch on a trackpad) zooms.</p>
+  </div>
+
+  <details class="fkd-list" data-field="list-wrap" hidden>
+    <summary data-field="list-summary">Relationships</summary>
+    <div class="tool-table-wrap">
+      <table class="tool-table">
+        <thead>
+          <tr>
+            <th scope="col">Table</th>
+            <th scope="col">Columns</th>
+            <th scope="col">References</th>
+            <th scope="col">Columns</th>
+            <th scope="col">Foreign key</th>
+            <th scope="col">Notes</th>
+          </tr>
+        </thead>
+        <tbody data-field="list"></tbody>
+      </table>
+    </div>
+  </details>
+</div>
+
+<script>
+  import { trackToolUse } from '../../scripts/analytics';
+  import { field, setStatus, wireCopyButton } from '../../scripts/tool-ui';
+  import { wireToolState } from '../../scripts/tool-state';
+  import {
+    EXAMPLE,
+    SIZES,
+    displayName,
+    edgeGeometry,
+    isOneToOne,
+    isOptional,
+    layout,
+    markerPaths,
+    parseResults,
+    toMermaid,
+    typeLabel,
+    visibleTables,
+    type Box,
+    type ColumnMode,
+    type ForeignKey,
+    type Layout,
+    type Model,
+  } from '../../scripts/tools/fk-diagram';
+
+  const TOOL = 'foreign-key-diagram';
+  const NS = 'http://www.w3.org/2000/svg';
+  const PAD = 24;
+  const MIN_READABLE = 0.7;
+
+  // The diagram's styles, written once with CSS variables for the page and once with their values for exports
+  const svgCss = (v: (name: string) => string, mono: string, sans: string) => `
+    .fkd-svg text { font-family: ${mono}; }
+    .fkd-box { fill: ${v('--surface-raised')}; stroke: ${v('--border-strong')}; stroke-width: 1; }
+    .fkd-head { fill: ${v('--accent-tint')}; }
+    .fkd-rule { stroke: ${v('--border-default')}; stroke-width: 1; }
+    .fkd-svg .fkd-title { font-family: ${sans}; font-size: 13.5px; font-weight: 600; fill: ${v('--text-strong')}; }
+    .fkd-schema { fill: ${v('--text-muted')}; font-weight: 500; }
+    .fkd-col { font-size: 12px; fill: ${v('--text-body')}; }
+    .fkd-col.is-pk { font-weight: 700; fill: ${v('--text-strong')}; }
+    .fkd-type { font-size: 11.5px; fill: ${v('--text-muted')}; }
+    .fkd-badge { font-size: 9.5px; font-weight: 700; letter-spacing: 0.04em; }
+    .fkd-badge.pk { fill: ${v('--warning-fg')}; }
+    .fkd-badge.fk { fill: ${v('--accent')}; }
+    .fkd-line, .fkd-mark { fill: none; stroke: ${v('--ink-500')}; stroke-width: 1.4; }
+    .fkd-ring { fill: ${v('--surface-raised')}; stroke: ${v('--ink-500')}; stroke-width: 1.4; }
+    .fkd-hit { fill: none; stroke: transparent; stroke-width: 12; }
+    .is-untrusted .fkd-line { stroke: ${v('--warning-fg')}; stroke-dasharray: 7 4; }
+    .is-untrusted .fkd-mark, .is-untrusted .fkd-ring { stroke: ${v('--warning-fg')}; }
+    .is-disabled .fkd-line { stroke: ${v('--danger-fg')}; stroke-dasharray: 3 4; }
+    .is-disabled .fkd-mark, .is-disabled .fkd-ring { stroke: ${v('--danger-fg')}; }
+    .fkd-svg.is-dim .fkd-table:not(.is-on), .fkd-svg.is-dim .fkd-edge:not(.is-on) { opacity: 0.18; }
+    .fkd-edge.is-on .fkd-line, .fkd-edge.is-on .fkd-mark, .fkd-edge.is-on .fkd-ring { stroke-width: 2.2; }
+    .fkd-edge.is-on:not(.is-untrusted):not(.is-disabled) .fkd-line,
+    .fkd-edge.is-on:not(.is-untrusted):not(.is-disabled) .fkd-mark,
+    .fkd-edge.is-on:not(.is-untrusted):not(.is-disabled) .fkd-ring { stroke: ${v('--accent')}; }
+    .fkd-table.is-selected .fkd-box { stroke: ${v('--accent')}; stroke-width: 2; }
+    .fkd-table { cursor: grab; }
+  `;
+
+  const el = <K extends keyof SVGElementTagNameMap>(name: K, attrs: Record<string, string | number> = {}, text?: string) => {
+    const node = document.createElementNS(NS, name);
+    for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, String(v));
+    if (text !== undefined) node.textContent = text;
+    return node;
+  };
+
+  const root = document.querySelector<HTMLElement>(`[data-tool="${TOOL}"]`);
+
+  if (root) {
+    const input = field<HTMLTextAreaElement>(root, 'input');
+    const columns = field<HTMLSelectElement>(root, 'columns');
+    const focus = field<HTMLSelectElement>(root, 'focus');
+    const depth = field<HTMLSelectElement>(root, 'depth');
+    const isolated = field<HTMLInputElement>(root, 'isolated');
+    const status = field<HTMLElement>(root, 'status');
+    const stage = field<HTMLElement>(root, 'stage');
+    const svg = field<HTMLElement>(root, 'svg-root') as unknown as SVGSVGElement;
+    const world = field<HTMLElement>(root, 'world') as unknown as SVGGElement;
+    const listWrap = field<HTMLDetailsElement>(root, 'list-wrap');
+    const listSummary = field<HTMLElement>(root, 'list-summary');
+    const list = field<HTMLTableSectionElement>(root, 'list');
+
+    const pageVar = (name: string) => `var(${name})`;
+    (field<HTMLElement>(root, 'svg-style') as unknown as SVGStyleElement).textContent = svgCss(pageVar, 'var(--font-mono)', 'var(--font-sans)');
+
+    let model: Model | null = null;
+    let current: Layout | null = null;
+    let visible = new Set<string>();
+    let selected: string | null = null;
+    let hovered: string | null = null;
+    const view = { tx: 0, ty: 0, k: 1 };
+    const tableEls = new Map<string, SVGGElement>();
+    const edgeEls: { fk: ForeignKey; g: SVGGElement; line: SVGPathElement; hit: SVGPathElement; mark: SVGPathElement; rings: SVGCircleElement[] }[] = [];
+
+    const applyView = () => world.setAttribute('transform', `translate(${view.tx} ${view.ty}) scale(${view.k})`);
+
+    // The space the tables take up now, including any that have been dragged
+    const bounds = () => {
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      for (const b of current!.boxes.values()) {
+        minX = Math.min(minX, b.x); minY = Math.min(minY, b.y);
+        maxX = Math.max(maxX, b.x + b.w); maxY = Math.max(maxY, b.y + b.h);
+      }
+      return minX === Infinity ? { minX: 0, minY: 0, width: 1, height: 1 } : { minX, minY, width: maxX - minX, height: maxY - minY };
+    };
+
+    // Fit the whole diagram in view. Drawing a new diagram stops at a zoom that can still be read,
+    // starting from the top left, and the Fit button shows everything however small.
+    const fit = (readable = false) => {
+      if (!current) return;
+      const rect = svg.getBoundingClientRect();
+      const b = bounds();
+      let k = Math.max(0.05, Math.min((rect.width - PAD * 2) / b.width, (rect.height - PAD * 2) / b.height, 1.2));
+      const tooSmall = readable && k < MIN_READABLE;
+      if (tooSmall) k = MIN_READABLE;
+      view.k = k;
+      view.tx = (tooSmall ? PAD : (rect.width - b.width * k) / 2) - b.minX * k;
+      view.ty = (tooSmall ? PAD : Math.max(PAD, (rect.height - b.height * k) / 2)) - b.minY * k;
+      applyView();
+    };
+
+    const zoomAt = (factor: number, cx: number, cy: number) => {
+      const k = Math.min(4, Math.max(0.05, view.k * factor));
+      view.tx = cx - ((cx - view.tx) * k) / view.k;
+      view.ty = cy - ((cy - view.ty) * k) / view.k;
+      view.k = k;
+      applyView();
+    };
+
+    const drawEdge = (e: (typeof edgeEls)[number]) => {
+      const boxes = current!.boxes;
+      const geometry = edgeGeometry(boxes.get(e.fk.parent)!, boxes.get(e.fk.child)!, e.fk);
+      const marks = markerPaths(geometry, isOptional(model!, e.fk), isOneToOne(model!, e.fk));
+      e.line.setAttribute('d', geometry.d);
+      e.hit.setAttribute('d', geometry.d);
+      e.mark.setAttribute('d', marks.lines);
+      e.rings.forEach((ring, i) => {
+        const circle = marks.circles[i];
+        ring.setAttribute('cx', String(circle?.cx ?? 0));
+        ring.setAttribute('cy', String(circle?.cy ?? 0));
+        ring.setAttribute('r', circle ? '4' : '0');
+      });
+    };
+
+    const highlight = () => {
+      const id = selected ?? hovered;
+      svg.classList.toggle('is-dim', !!id);
+      const on = new Set(id ? [id] : []);
+      for (const e of edgeEls) {
+        const lit = !!id && (e.fk.child === id || e.fk.parent === id);
+        e.g.classList.toggle('is-on', lit);
+        if (lit) { on.add(e.fk.child); on.add(e.fk.parent); }
+      }
+      for (const [tid, g] of tableEls) {
+        g.classList.toggle('is-on', on.has(tid));
+        g.classList.toggle('is-selected', tid === selected);
+      }
+    };
+
+    const fkSummary = (fk: ForeignKey) => {
+      const child = model!.tables.get(fk.child)!;
+      const parent = model!.tables.get(fk.parent)!;
+      const cols = (side: 'child' | 'parent') => fk.pairs.map((p) => p[side]).join(', ');
+      const notes = relationshipNotes(fk);
+      return `${fk.name ?? 'Foreign key'}: ${displayName(model!, child)} (${cols('child')}) references ${displayName(model!, parent)} (${cols('parent')})${notes.length ? `. ${notes.join(', ')}` : ''}`;
+    };
+
+    const relationshipNotes = (fk: ForeignKey) => {
+      const notes: string[] = [];
+      if (fk.child === fk.parent) notes.push('references its own table');
+      if (isOneToOne(model!, fk)) notes.push('one-to-one');
+      if (isOptional(model!, fk)) notes.push('optional (nullable)');
+      if (fk.pairs.length > 1) notes.push(`${fk.pairs.length} columns`);
+      if (fk.onDelete && !/^no[_ ]?action$/i.test(fk.onDelete)) notes.push(`on delete ${fk.onDelete.replace(/_/g, ' ').toLowerCase()}`);
+      if (fk.disabled) notes.push('disabled');
+      else if (fk.untrusted) notes.push('not trusted');
+      return notes;
+    };
+
+    const drawTable = (box: Box) => {
+      const t = model!.tables.get(box.id)!;
+      const g = el('g', { class: 'fkd-table', 'data-id': box.id, transform: `translate(${box.x} ${box.y})` });
+      g.append(el('title', {}, displayName(model!, t)));
+      g.append(el('rect', { class: 'fkd-box', width: box.w, height: box.h, rx: 6 }));
+      if (box.rows.length) {
+        // Header with rounded top corners only
+        g.append(el('path', { class: 'fkd-head', d: `M 0.5 6.5 a 6 6 0 0 1 6 -6 H ${box.w - 6.5} a 6 6 0 0 1 6 6 V ${SIZES.header} H 0.5 Z` }));
+        g.append(el('line', { class: 'fkd-rule', x1: 0.5, x2: box.w - 0.5, y1: SIZES.header, y2: SIZES.header }));
+      } else {
+        g.append(el('rect', { class: 'fkd-head', x: 0.5, y: 0.5, width: box.w - 1, height: box.h - 1, rx: 6 }));
+      }
+      const title = el('text', { class: 'fkd-title', x: 12, y: 21 });
+      if (model!.schemas > 1 && t.schema) title.append(el('tspan', { class: 'fkd-schema' }, `${t.schema}.`));
+      title.append(document.createTextNode(t.name));
+      g.append(title);
+
+      box.rows.forEach((c, i) => {
+        const y = SIZES.header + i * SIZES.row + SIZES.row / 2 + 4;
+        const row = el('g');
+        const details = [c.type, c.nullable === true ? 'NULL' : c.nullable === false ? 'NOT NULL' : null, c.pk && 'primary key', c.fk && 'foreign key']
+          .filter(Boolean)
+          .join(', ');
+        row.append(el('title', {}, `${c.name}${details ? `: ${details}` : ''}`));
+        const badge = [c.pk && 'PK', c.fk && 'FK'].filter(Boolean) as string[];
+        if (badge.length) {
+          const b = el('text', { class: `fkd-badge ${c.pk ? 'pk' : 'fk'}`, x: 12, y: y - 0.5 });
+          badge.forEach((word, n) => b.append(el('tspan', { class: `fkd-badge ${word.toLowerCase()}`, dx: n ? 3 : 0 }, word)));
+          row.append(b);
+        } else if (c.referenced && !model!.full) {
+          row.append(el('text', { class: 'fkd-badge pk', x: 12, y: y - 0.5 }, 'KEY'));
+        }
+        row.append(el('text', { class: `fkd-col${c.pk ? ' is-pk' : ''}`, x: 12 + SIZES.badge, y }, c.name));
+        const type = typeLabel(c);
+        if (type) row.append(el('text', { class: 'fkd-type', x: box.w - 12, y, 'text-anchor': 'end' }, type));
+        g.append(row);
+      });
+      return g;
+    };
+
+    const renderList = () => {
+      const shown = model!.fks.filter((fk) => visible.has(fk.child) && visible.has(fk.parent));
+      listSummary.textContent = `Relationships shown (${shown.length})`;
+      listWrap.hidden = !shown.length;
+      const td = (text: string, mono = true) => {
+        const cell = document.createElement('td');
+        if (mono) cell.className = 'mono';
+        cell.textContent = text;
+        return cell;
+      };
+      list.replaceChildren(
+        ...shown.map((fk) => {
+          const tr = document.createElement('tr');
+          tr.append(
+            td(displayName(model!, model!.tables.get(fk.child)!)),
+            td(fk.pairs.map((p) => p.child).join(', ')),
+            td(displayName(model!, model!.tables.get(fk.parent)!)),
+            td(fk.pairs.map((p) => p.parent).join(', ')),
+            td(fk.name ?? ''),
+            td(relationshipNotes(fk).join(', '), false),
+          );
+          return tr;
+        }),
+      );
+    };
+
+    const render = (refit: boolean) => {
+      if (!model) return;
+      const mode = columns.value as ColumnMode;
+      visible = visibleTables(model, focus.value || null, Number(depth.value), isolated.checked || !!focus.value);
+      current = layout(model, visible, mode);
+      if (selected && !visible.has(selected)) selected = null;
+      hovered = null;
+
+      tableEls.clear();
+      edgeEls.length = 0;
+      const edges = el('g');
+      const tables = el('g');
+      for (const fk of model.fks) {
+        if (!visible.has(fk.child) || !visible.has(fk.parent)) continue;
+        const cls = ['fkd-edge', fk.disabled ? 'is-disabled' : fk.untrusted ? 'is-untrusted' : ''].join(' ').trim();
+        const g = el('g', { class: cls });
+        g.append(el('title', {}, fkSummary(fk)));
+        const entry = {
+          fk,
+          g,
+          hit: el('path', { class: 'fkd-hit' }),
+          line: el('path', { class: 'fkd-line' }),
+          mark: el('path', { class: 'fkd-mark' }),
+          rings: [el('circle', { class: 'fkd-ring' }), el('circle', { class: 'fkd-ring' })],
+        };
+        g.append(entry.hit, entry.line, entry.mark, ...entry.rings);
+        edgeEls.push(entry);
+        drawEdge(entry);
+        edges.append(g);
+      }
+      for (const box of current.boxes.values()) {
+        const g = drawTable(box);
+        tableEls.set(box.id, g);
+        tables.append(g);
+      }
+      world.replaceChildren(edges, tables);
+      stage.hidden = false;
+      highlight();
+      if (refit) fit(true);
+      renderList();
+
+      const shownFks = edgeEls.length;
+      const notes = [`${visible.size} table${visible.size === 1 ? '' : 's'}`, `${shownFks} foreign key${shownFks === 1 ? '' : 's'}`];
+      const shown = edgeEls.map((e) => e.fk);
+      const composite = shown.filter((fk) => fk.pairs.length > 1).length;
+      const untrusted = shown.filter((fk) => fk.untrusted && !fk.disabled).length;
+      const disabled = shown.filter((fk) => fk.disabled).length;
+      if (composite) notes.push(`${composite} on more than one column`);
+      if (untrusted) notes.push(`${untrusted} not trusted`);
+      if (disabled) notes.push(`${disabled} disabled`);
+      if (visible.size < model.tables.size) notes.push(`${model.tables.size - visible.size} hidden`);
+      if (model.skipped) notes.push(`${model.skipped} row${model.skipped === 1 ? '' : 's'} without a table name skipped`);
+      let message = notes.join(' · ');
+      if (!model.full && mode === 'all') message += '. The paste only has the columns used by foreign keys; the second query above includes every column.';
+      setStatus(status, message, model.skipped || disabled || untrusted ? 'warn' : 'info');
+    };
+
+    const fillFocus = () => {
+      const keep = focus.value;
+      const options = [...model!.tables.values()]
+        .map((t) => ({ id: t.id, label: displayName(model!, t) }))
+        .sort((a, b) => a.label.localeCompare(b.label));
+      focus.replaceChildren(new Option('Every table', ''), ...options.map((o) => new Option(o.label, o.id)));
+      focus.value = options.some((o) => o.id === keep) ? keep : '';
+      focus.disabled = false;
+      depth.disabled = !focus.value;
+    };
+
+    const draw = (action: string) => {
+      try {
+        model = parseResults(input.value);
+      } catch (err) {
+        model = null;
+        stage.hidden = true;
+        listWrap.hidden = true;
+        setStatus(status, (err as Error).message, 'error');
+        return;
+      }
+      selected = null;
+      fillFocus();
+      render(true);
+      trackToolUse(TOOL, action);
+    };
+
+    field<HTMLButtonElement>(root, 'draw').addEventListener('click', () => draw('draw'));
+    field<HTMLButtonElement>(root, 'example').addEventListener('click', () => {
+      input.value = EXAMPLE;
+      draw('example');
+    });
+    input.addEventListener('paste', () => setTimeout(() => draw('draw'), 0));
+
+    columns.addEventListener('change', () => render(true));
+    isolated.addEventListener('change', () => render(true));
+    focus.addEventListener('change', () => {
+      depth.disabled = !focus.value;
+      selected = focus.value || null;
+      render(true);
+    });
+    depth.addEventListener('change', () => render(true));
+
+    // ---- Moving around: drag to pan, drag a table to move it, click to select, Ctrl + wheel to zoom
+
+    let drag: { x: number; y: number; tx: number; ty: number; id: string | null; bx: number; by: number; moved: boolean; pointer: number } | null = null;
+
+    svg.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0 || !current) return;
+      const id = (e.target as Element).closest<SVGGElement>('.fkd-table')?.dataset.id ?? null;
+      const box = id ? current.boxes.get(id)! : null;
+      drag = { x: e.clientX, y: e.clientY, tx: view.tx, ty: view.ty, id, bx: box?.x ?? 0, by: box?.y ?? 0, moved: false, pointer: e.pointerId };
+      svg.setPointerCapture(e.pointerId);
+    });
+
+    svg.addEventListener('pointermove', (e) => {
+      if (!drag || e.pointerId !== drag.pointer || !current) return;
+      const dx = e.clientX - drag.x;
+      const dy = e.clientY - drag.y;
+      if (!drag.moved && Math.hypot(dx, dy) < 4) return;
+      drag.moved = true;
+      svg.classList.add('is-dragging');
+      if (drag.id) {
+        const box = current.boxes.get(drag.id)!;
+        box.x = drag.bx + dx / view.k;
+        box.y = drag.by + dy / view.k;
+        tableEls.get(drag.id)!.setAttribute('transform', `translate(${box.x} ${box.y})`);
+        for (const edge of edgeEls) if (edge.fk.child === drag.id || edge.fk.parent === drag.id) drawEdge(edge);
+      } else {
+        view.tx = drag.tx + dx;
+        view.ty = drag.ty + dy;
+        applyView();
+      }
+    });
+
+    const endDrag = (e: PointerEvent) => {
+      if (!drag || e.pointerId !== drag.pointer) return;
+      if (!drag.moved && e.type === 'pointerup') {
+        selected = drag.id && drag.id !== selected ? drag.id : null;
+        highlight();
+      }
+      svg.classList.remove('is-dragging');
+      drag = null;
+    };
+    svg.addEventListener('pointerup', endDrag);
+    svg.addEventListener('pointercancel', endDrag);
+
+    svg.addEventListener('pointerover', (e) => {
+      if (drag?.moved || e.pointerType === 'touch') return;
+      const id = (e.target as Element).closest<SVGGElement>('.fkd-table')?.dataset.id ?? null;
+      if (id !== hovered) { hovered = id; highlight(); }
+    });
+    svg.addEventListener('pointerleave', () => { hovered = null; highlight(); });
+
+    svg.addEventListener('wheel', (e) => {
+      if (!e.ctrlKey && !e.metaKey) return;
+      e.preventDefault();
+      const rect = svg.getBoundingClientRect();
+      zoomAt(Math.exp(-e.deltaY * 0.0025), e.clientX - rect.left, e.clientY - rect.top);
+    }, { passive: false });
+
+    const zoomCentre = (factor: number) => {
+      const rect = svg.getBoundingClientRect();
+      zoomAt(factor, rect.width / 2, rect.height / 2);
+    };
+    field<HTMLButtonElement>(root, 'zoom-in').addEventListener('click', () => zoomCentre(1.25));
+    field<HTMLButtonElement>(root, 'zoom-out').addEventListener('click', () => zoomCentre(0.8));
+    field<HTMLButtonElement>(root, 'fit').addEventListener('click', () => fit());
+
+    const fullButton = field<HTMLButtonElement>(root, 'full');
+    if (!stage.requestFullscreen) fullButton.hidden = true;
+    fullButton.addEventListener('click', () => {
+      if (document.fullscreenElement) document.exitFullscreen();
+      else stage.requestFullscreen().catch(() => setStatus(status, "This browser wouldn't open the diagram full screen.", 'warn'));
+    });
+    document.addEventListener('fullscreenchange', () => {
+      fullButton.textContent = document.fullscreenElement === stage ? 'Exit full screen' : 'Full screen';
+      requestAnimationFrame(() => fit(true));
+    });
+
+    // ---- Exports
+
+    const exportSvg = (): { text: string; width: number; height: number } => {
+      const styles = getComputedStyle(root);
+      const resolved = (name: string) => styles.getPropertyValue(name).trim() || '#000';
+      const b = bounds();
+      // Room for the loops of tables that reference themselves, which reach past the table
+      const pad = 60;
+      const width = Math.ceil(b.width + pad * 2);
+      const height = Math.ceil(b.height + pad * 2);
+      const out = el('svg', { xmlns: NS, width, height, viewBox: `0 0 ${width} ${height}`, class: 'fkd-svg' });
+      out.append(el('style', {}, svgCss(resolved, resolved('--font-mono'), resolved('--font-sans'))));
+      out.append(el('rect', { width, height, fill: resolved('--surface-card') }));
+      const copy = world.cloneNode(true) as SVGGElement;
+      copy.setAttribute('transform', `translate(${pad - b.minX} ${pad - b.minY})`);
+      copy.querySelectorAll('.is-on, .is-selected').forEach((n) => n.classList.remove('is-on', 'is-selected'));
+      out.append(copy);
+      return { text: '<?xml version="1.0" encoding="UTF-8"?>\n' + new XMLSerializer().serializeToString(out), width, height };
+    };
+
+    const save = (blob: Blob, name: string) => {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = name;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    };
+
+    field<HTMLButtonElement>(root, 'svg').addEventListener('click', () => {
+      if (!current) return;
+      save(new Blob([exportSvg().text], { type: 'image/svg+xml' }), 'foreign-keys.svg');
+      trackToolUse(TOOL, 'svg');
+    });
+
+    field<HTMLButtonElement>(root, 'png').addEventListener('click', () => {
+      if (!current) return;
+      const { text, width, height } = exportSvg();
+      // Two pixels per point, unless that would make a canvas too big for the browser
+      const scale = Math.min(2, 16000 / width, 16000 / height, Math.sqrt(120_000_000 / (width * height)));
+      const image = new Image();
+      const url = URL.createObjectURL(new Blob([text], { type: 'image/svg+xml' }));
+      image.onload = () => {
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.round(width * scale);
+        canvas.height = Math.round(height * scale);
+        const ctx = canvas.getContext('2d')!;
+        ctx.scale(scale, scale);
+        ctx.drawImage(image, 0, 0, width, height);
+        URL.revokeObjectURL(url);
+        canvas.toBlob((blob) => {
+          if (blob) save(blob, 'foreign-keys.png');
+          else setStatus(status, 'The diagram is too large to save as a PNG. Try Download SVG, or show fewer tables.', 'error');
+        }, 'image/png');
+      };
+      image.onerror = () => {
+        URL.revokeObjectURL(url);
+        setStatus(status, "Couldn't make the PNG. Try Download SVG instead.", 'error');
+      };
+      image.src = url;
+      trackToolUse(TOOL, 'png');
+    });
+
+    wireCopyButton(
+      field<HTMLButtonElement>(root, 'mermaid'),
+      () => (model ? toMermaid(model, visible, columns.value as ColumnMode) : ''),
+      TOOL,
+    );
+
+    // Share links, and restoring inputs from a link (after the handlers above, so the result can be shown)
+    wireToolState(root, TOOL, status);
+  }
+</script>
+
+<style is:global>
+  .fkd .fkd-stage {
+    display: grid;
+    gap: 8px;
+    min-width: 0;
+  }
+
+  .fkd .fkd-stage:fullscreen {
+    grid-template-rows: auto 1fr auto auto;
+    padding: 16px;
+    background: var(--surface-card);
+  }
+
+  .fkd .fkd-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  .fkd .fkd-group {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .fkd .fkd-viewport {
+    height: min(70vh, 640px);
+    min-height: 320px;
+    overflow: hidden;
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-md);
+    background-color: var(--surface-card);
+    background-image: radial-gradient(var(--border-default) 1px, transparent 1px);
+    background-size: 18px 18px;
+  }
+
+  .fkd .fkd-stage:fullscreen .fkd-viewport {
+    height: auto;
+  }
+
+  .fkd .fkd-svg {
+    display: block;
+    width: 100%;
+    height: 100%;
+    touch-action: none;
+    user-select: none;
+    cursor: move;
+  }
+
+  .fkd .fkd-svg.is-dragging,
+  .fkd .fkd-svg.is-dragging .fkd-table {
+    cursor: grabbing;
+  }
+
+  .fkd .fkd-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 18px;
+    color: var(--text-muted);
+    font-size: 13px;
+  }
+
+  .fkd .fkd-legend span {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .fkd .fkd-legend path,
+  .fkd .fkd-legend circle {
+    fill: none;
+    stroke: var(--ink-500);
+    stroke-width: 1.4;
+  }
+
+  .fkd .fkd-legend circle {
+    fill: var(--surface-card);
+  }
+
+  .fkd .fkd-legend path.untrusted {
+    stroke: var(--warning-fg);
+    stroke-dasharray: 7 4;
+  }
+
+  .fkd .fkd-legend path.disabled {
+    stroke: var(--danger-fg);
+    stroke-dasharray: 3 4;
+  }
+
+  .fkd .fkd-hint {
+    margin: 0;
+    color: var(--text-muted);
+    font-size: 13px;
+  }
+
+  .fkd .fkd-list summary {
+    color: var(--text-strong);
+    font-weight: 600;
+    cursor: pointer;
+  }
+
+  .fkd .fkd-list .tool-table-wrap {
+    margin-top: 8px;
+  }
+</style>

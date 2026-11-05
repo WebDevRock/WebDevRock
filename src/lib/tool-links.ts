@@ -21,6 +21,7 @@ export const TOOL_FIELDS: Record<string, { fields: string[]; run: string }> = {
   },
   'retry-schedule': { fields: ['retries', 'unit', 'base', 'multiplier', 'max', 'timeout', 'jitter'], run: 'calculate' },
   'timestamp-converter': { fields: ['input', 'kind', 'zone'], run: 'convert' },
+  'foreign-key-diagram': { fields: ['input', 'columns', 'isolated'], run: 'draw' },
 };
 
 export const toolPath = (tool: string) => `/tools/${tool}/`;
